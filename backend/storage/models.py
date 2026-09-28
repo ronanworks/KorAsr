@@ -1,5 +1,6 @@
 # backend/storage/models.py
 from sqlmodel import SQLModel, Field, Relationship
+from sqlalchemy import Text, UniqueConstraint
 from datetime import datetime, timezone
 from typing import Optional, List
 from uuid import uuid4
@@ -7,7 +8,11 @@ from uuid import uuid4
 
 class Session(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    user_id: Optional[str] = Field(default=None, foreign_key="user.id", index=True)
     name: str
+    source_lang: str = Field(default="ko")
+    target_lang: str = Field(default="zh")
+    recording_state: str = Field(default="created")  # created → recording → ended
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     ended_at: Optional[datetime] = None
     duration_seconds: Optional[int] = None
@@ -15,6 +20,30 @@ class Session(SQLModel, table=True):
     summary: Optional[str] = None
     notes: Optional[str] = None
     segments: List["Segment"] = Relationship(back_populates="session")
+
+
+class User(SQLModel, table=True):
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    username: str = Field(index=True, unique=True)
+    password_hash: str
+    is_admin: bool = False
+    is_active: bool = True
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class LoginSession(SQLModel, table=True):
+    id: str = Field(primary_key=True)  # SHA-256 of the opaque browser cookie
+    user_id: str = Field(foreign_key="user.id", index=True)
+    expires_at: datetime = Field(index=True)
+    revoked_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class LoginAttempt(SQLModel, table=True):
+    key: str = Field(primary_key=True)  # hashed IP or username, not plaintext
+    failures: int = 0
+    window_started_at: datetime = Field(index=True)
+    blocked_until: Optional[datetime] = None
 
 
 class Segment(SQLModel, table=True):
@@ -39,6 +68,37 @@ class PolishedChunk(SQLModel, table=True):
     chunk_index: int
     start_segment_seq: int
     end_segment_seq: int
-    ko_combined: str         # 合并后的韩文原文（按 sequence 顺序）
-    zh_polished: str         # LLM 重译后的中文（自然分段、术语一致）
+    ko_combined: str         # source transcript; legacy column name retained for SQLite compatibility
+    zh_polished: str         # translated target text; legacy column name retained
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class GlossaryTerm(SQLModel, table=True):
+    """Session-specific source→target terminology, stored separately for old DBs."""
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "source_key", name="uq_glossary_session_source"),
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    session_id: str = Field(foreign_key="session.id", index=True)
+    position: int
+    source: str
+    target: str
+    source_key: str  # NFKC + casefold key; never sent to the client
+
+
+class SessionMaterial(SQLModel, table=True):
+    """A bounded course document and its locally extracted searchable text."""
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    session_id: str = Field(foreign_key="session.id", index=True)
+    original_filename: str
+    extension: str
+    media_type: str
+    size_bytes: int
+    sha256: str
+    extraction_status: str  # ready, needs_ocr, or no_text
+    extracted_char_count: int
+    extracted_text: str = Field(default="", sa_type=Text)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

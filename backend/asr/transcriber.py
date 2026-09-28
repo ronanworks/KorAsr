@@ -9,6 +9,7 @@ from backend.config import settings
 
 SAMPLE_RATE = 16000
 OVERLAP_SAMPLES = int(SAMPLE_RATE * 0.4)  # 400ms 重叠窗口，防止切词
+PRE_SPEECH_SAMPLES = int(SAMPLE_RATE * 0.6)  # Keep only 600ms before VAD first finds speech.
 PROMPT_ECHO_THRESHOLD = 0.65               # 输出与 prompt 字符相似度高于此值即视为 prompt 回放
 FINAL_MIN_RMS = 0.005                      # finals 阶段音频 RMS 低于此值直接跳过 Whisper（防止噪声幻觉）
 LOW_ENERGY_HALLUCINATION_RMS = 0.025       # 短语精确匹配的"低能量幻觉"阈值（高于此值认为是真说话，不挡）
@@ -39,6 +40,17 @@ def _looks_repetitive(text: str) -> bool:
     if len(words) < 6:
         return False
     return len(set(words)) / len(words) < REPETITION_UNIQUE_RATIO
+
+
+def _is_non_speech_transcript(text: str) -> bool:
+    """Reject punctuation storms Whisper commonly emits for silence/noise."""
+    compact = "".join(text.split())
+    content = sum(char.isalnum() for char in compact)
+    if content == 0:
+        return True
+    if len(compact) >= 8 and content / len(compact) < 0.45:
+        return True
+    return bool(re.search(r"[,.。，、!?！？…]{5,}", compact))
 
 
 def _is_low_energy_common_hallucination(text: str, rms: float) -> bool:
@@ -76,12 +88,12 @@ def _is_prompt_echo(text: str, prompt: str) -> bool:
     return matcher.ratio() > PROMPT_ECHO_THRESHOLD
 
 
-def _run_inference_faster_whisper(audio: np.ndarray, prompt: str, beam_size: int) -> str:
+def _run_inference_faster_whisper(audio: np.ndarray, prompt: str, beam_size: int, language: str) -> str:
     """faster-whisper 后端：CTranslate2，CPU/CUDA 通用。"""
     model = get_model()
     segments, _ = model.transcribe(
         audio,
-        language="ko",
+        language=language,
         beam_size=beam_size,
         temperature=0.0,                              # 单一 temperature，不走 retry 链（CPU 上代价高）
         vad_filter=False,                             # 上游 Silero VAD 已处理；内部再加会触发 empty 雪崩
@@ -95,7 +107,7 @@ def _run_inference_faster_whisper(audio: np.ndarray, prompt: str, beam_size: int
     return "".join(seg.text for seg in segments).strip()
 
 
-def _run_inference_mlx(audio: np.ndarray, prompt: str, beam_size: int) -> str:
+def _run_inference_mlx(audio: np.ndarray, prompt: str, beam_size: int, language: str) -> str:
     """mlx-whisper 后端：Apple MLX，走 M-series GPU (Metal)。"""
     import mlx_whisper
     # 注意 mlx-whisper 的参数名 logprob_threshold（无下划线）不同于 faster-whisper 的 log_prob_threshold
@@ -103,7 +115,7 @@ def _run_inference_mlx(audio: np.ndarray, prompt: str, beam_size: int) -> str:
     result = mlx_whisper.transcribe(
         audio,
         path_or_hf_repo=get_mlx_repo(),
-        language="ko",
+        language=language,
         temperature=0.0,
         condition_on_previous_text=False,             # 同上：关掉防止单次 transcribe 内 segment 循环
         initial_prompt=prompt or None,
@@ -115,14 +127,19 @@ def _run_inference_mlx(audio: np.ndarray, prompt: str, beam_size: int) -> str:
     return result["text"].strip()
 
 
-def _run_inference(audio: np.ndarray, prompt: str, beam_size: int) -> str:
+def _run_inference(audio: np.ndarray, prompt: str, beam_size: int, language: str) -> str:
     """根据 settings.asr_backend 分发到对应后端。"""
     if settings.asr_backend == "mlx":
-        return _run_inference_mlx(audio, prompt, beam_size)
-    return _run_inference_faster_whisper(audio, prompt, beam_size)
+        return _run_inference_mlx(audio, prompt, beam_size, language)
+    return _run_inference_faster_whisper(audio, prompt, beam_size, language)
 
 
-def transcribe_audio(audio: np.ndarray, fast: bool = False, initial_prompt: str | None = None) -> str:
+def transcribe_audio(
+    audio: np.ndarray,
+    fast: bool = False,
+    initial_prompt: str | None = None,
+    language: str = "ko",
+) -> str:
     """Run Whisper inference on an audio array.
 
     fast=True  → beam_size=2, temperature=0 (greedy, ~3x faster) — used for interim previews.
@@ -131,7 +148,10 @@ def transcribe_audio(audio: np.ndarray, fast: bool = False, initial_prompt: str 
     initial_prompt is prepended to the decoder context so Whisper remembers what was
     said in previous segments (rolling context from the caller).
     """
-    prompt = initial_prompt.strip() if initial_prompt is not None else settings.asr_initial_prompt
+    if language not in {"ko", "zh"}:
+        raise ValueError(f"Unsupported ASR language: {language}")
+    default_prompt = settings.asr_initial_prompt if language == "ko" else settings.asr_initial_prompt_zh
+    prompt = initial_prompt.strip() if initial_prompt is not None else default_prompt
 
     duration = len(audio) / SAMPLE_RATE
     rms = float(np.sqrt(np.mean(audio**2))) if len(audio) else 0.0
@@ -146,52 +166,61 @@ def transcribe_audio(audio: np.ndarray, fast: bool = False, initial_prompt: str 
 
     beam_size = 2 if fast else settings.asr_beam_size
     t0 = time.perf_counter()
-    text = _run_inference(audio, prompt, beam_size)
+    text = _run_inference(audio, prompt, beam_size, language)
     elapsed = time.perf_counter() - t0
     rtf = elapsed / duration if duration > 0 else 0.0  # Real-time factor: <1.0 = 推理跑得过音频流入
 
     # ── Diagnostic log ──────────────────────────────────────
     backend_tag = "MLX" if settings.asr_backend == "mlx" else "FW "
-    print(f"[ASR {mode} {backend_tag}] dur={duration:.2f}s rms={rms:.4f} infer={elapsed:.2f}s rtf={rtf:.2f}x → {text!r}")
+    print(f"[ASR {mode} {backend_tag}] dur={duration:.2f}s rms={rms:.4f} infer={elapsed:.2f}s rtf={rtf:.2f}x -> {ascii(text)}")
 
     # 1) Prompt-echo 过滤：模型把 initial_prompt 原样吐回来时丢弃
     if prompt and _is_prompt_echo(text, prompt):
-        print(f"[ASR {mode}] DROPPED (prompt echo): {text!r}")
+        print(f"[ASR {mode}] DROPPED (prompt echo): {ascii(text)}")
         return ""
 
     # 2) 重复循环检测：condition_on_previous_text 自循环 / Whisper 内部 nan loop
     if _looks_repetitive(text):
-        print(f"[ASR {mode}] DROPPED (repetitive loop): {text[:60]!r}...")
+        print(f"[ASR {mode}] DROPPED (repetitive loop): {ascii(text[:60])}...")
+        return ""
+
+    if _is_non_speech_transcript(text):
+        print(f"[ASR {mode}] DROPPED (punctuation/noise transcript): {ascii(text[:80])}")
         return ""
 
     # 3) 低能量 + 常见短语精确匹配：噪声段被吐 '감사합니다.' / '네' 这种
     if _is_low_energy_common_hallucination(text, rms):
-        print(f"[ASR {mode}] DROPPED (low-energy hallucination, rms={rms:.4f}): {text!r}")
+        print(f"[ASR {mode}] DROPPED (low-energy hallucination, rms={rms:.4f}): {ascii(text)}")
         return ""
 
     # 4) 长文本黑名单：YouTube/TV 类固定幻觉
     # 长文本可能合法包含这些词，所以只过滤短的。
-    if any(w in text for w in settings.hallucination_blacklist) and len(text) < 45:
+    if language == "ko" and any(w in text for w in settings.hallucination_blacklist) and len(text) < 45:
         hit = [w for w in settings.hallucination_blacklist if w in text]
-        print(f"[ASR {mode}] DROPPED by blacklist {hit}: {text!r}")
+        print(f"[ASR {mode}] DROPPED by blacklist {ascii(hit)}: {ascii(text)}")
         return ""
     return text
 
 
 class Transcriber:
-    def __init__(self):
+    def __init__(self, language: str = "ko"):
+        if language not in {"ko", "zh"}:
+            raise ValueError(f"Unsupported ASR language: {language}")
+        self.language = language
         self.vad = SileroVAD(
             threshold=settings.vad_threshold,
             min_silence_ms=settings.vad_min_silence_ms,
             min_speech_ms=settings.vad_min_speech_ms,
         )
         self.audio_buffer = np.array([], dtype=np.float32)
+        self._has_speech = False
         self._buffer_start_s: float = 0.0
         self._buffer_wall_start: float = 0.0
         self.session_start_ms: float = 0.0
 
     def reset(self, session_start_ms: float = 0.0):
         self.audio_buffer = np.array([], dtype=np.float32)
+        self._has_speech = False
         self._buffer_start_s = 0.0
         self._buffer_wall_start = time.time()
         self.vad.reset()
@@ -200,6 +229,10 @@ class Transcriber:
     @property
     def buffer_seconds(self) -> float:
         return len(self.audio_buffer) / SAMPLE_RATE
+
+    @property
+    def has_speech(self) -> bool:
+        return self._has_speech
 
     @property
     def timestamp_ms(self) -> int:
@@ -216,6 +249,20 @@ class Transcriber:
         self.audio_buffer = np.concatenate((self.audio_buffer, chunk))
         vad_result = self.vad.process_chunk(chunk)
 
+        if vad_result["speech_prob"] >= settings.vad_threshold:
+            self._has_speech = True
+        if not self._has_speech:
+            # Retain a short lead-in for the next utterance, not minutes of
+            # silence. Forced 8s cuts must never send silence to Whisper.
+            if len(self.audio_buffer) > PRE_SPEECH_SAMPLES:
+                self.audio_buffer = self.audio_buffer[-PRE_SPEECH_SAMPLES:].copy()
+            self._buffer_wall_start = time.time() - len(self.audio_buffer) / SAMPLE_RATE
+            return {
+                "should_process": False, "should_interim": False,
+                "speech_prob": vad_result["speech_prob"],
+                "is_forced": False, "is_end": False,
+            }
+
         is_forced = self.buffer_seconds >= settings.asr_max_buffer_s
         is_end = vad_result["is_end"] and self.buffer_seconds >= settings.asr_min_buffer_s
 
@@ -231,7 +278,7 @@ class Transcriber:
         """对当前缓冲区执行 Whisper 推理，返回韩语文本"""
         if len(self.audio_buffer) == 0:
             return ""
-        return transcribe_audio(self.audio_buffer.copy(), initial_prompt=initial_prompt)
+        return transcribe_audio(self.audio_buffer.copy(), initial_prompt=initial_prompt, language=self.language)
 
     def _find_best_cut_point(self) -> int:
         """在缓冲区**最后 1.0 秒**里找能量最低的位置，返回切点（sample 索引）。
@@ -251,11 +298,17 @@ class Transcriber:
             return n
         min_rms = float("inf")
         best = n
+        window_rms = []
         for i in range(search_start, n - win + 1, hop):
             rms = float(np.sqrt(np.mean(self.audio_buffer[i:i + win] ** 2)))
+            window_rms.append(rms)
             if rms < min_rms:
                 min_rms = rms
                 best = i + win // 2
+        # A relative dip is a pause; the quietest part of continuously loud
+        # speech is still speech and must not be treated as a safe word break.
+        if min_rms >= max(0.010, 0.45 * float(np.median(window_rms))):
+            return n
         return best
 
     def commit(self, was_forced: bool = False) -> np.ndarray:
@@ -278,6 +331,13 @@ class Transcriber:
             else:
                 self.audio_buffer = np.array([], dtype=np.float32)
         self._buffer_start_s = len(self.audio_buffer) / SAMPLE_RATE
-        self._buffer_wall_start = time.time()
-        self.vad.reset()
+        self._buffer_wall_start = time.time() - len(self.audio_buffer) / SAMPLE_RATE
+        if was_forced:
+            # The speaker may still be mid-sentence. Keep both the retained
+            # overlap and VAD speech state so the next chunk does not treat
+            # the continuation as fresh silence and trim its first words.
+            self._has_speech = True
+        else:
+            self._has_speech = False
+            self.vad.reset()
         return audio_out

@@ -1,24 +1,36 @@
 <template>
   <div class="feed" ref="feedEl">
-    <div v-if="segments.length === 0" class="empty">Waiting for audio input...</div>
+    <div v-if="segments.length === 0" class="empty">
+      <strong>字幕会显示在这里</strong><span>开始课堂后，原文与译文会持续更新。</span>
+    </div>
     <div
       v-for="seg in segments"
       :key="seg.id"
       class="card"
       :class="seg.status"
     >
-      <button class="star" :class="{ active: seg.is_starred }" @click="$emit('star', seg.id)">
+      <div class="card-meta">
+        <span v-if="seg.status === 'interim'">临时识别 · 可能修改</span>
+        <span v-else-if="seg.status === 'translating'">{{ sourceLabel }}已确定 · {{ targetLabel }}生成中</span>
+        <span v-else-if="seg.status === 'error'">{{ sourceLabel }}已确定 · {{ targetLabel }}翻译失败</span>
+        <span v-else>已确定</span>
+        <time v-if="seg.timestamp_ms != null">{{ formatTs(seg.timestamp_ms) }}</time>
+      </div>
+      <button class="star" :class="{ active: seg.is_starred }" :aria-label="seg.is_starred ? '取消重点标记' : '标记重点'" :aria-pressed="Boolean(seg.is_starred)" @click="$emit('star', seg.id)">
         {{ seg.is_starred ? '★' : '☆' }}
       </button>
-      <div class="ko">{{ seg.ko }}</div>
-      <div class="zh" :class="{ pending: seg.status !== 'done' }">{{ seg.zh }}</div>
+      <div class="source" :lang="sourceLang">{{ seg.ko }}</div>
+      <div v-if="seg.zh || seg.status === 'translating'" class="target" :lang="targetLang" :class="{ generating: seg.status === 'translating' }">{{ seg.zh || '翻译生成中…' }}</div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
-const props = defineProps(['segments'])
+import { ref, watch, nextTick, onMounted, onBeforeUnmount, computed } from 'vue'
+import { languageLabel } from '../utils/languages.js'
+const props = defineProps(['segments', 'sourceLang', 'targetLang'])
+const sourceLabel = computed(() => languageLabel(props.sourceLang))
+const targetLabel = computed(() => languageLabel(props.targetLang))
 defineEmits(['star'])
 const feedEl = ref(null)
 
@@ -33,28 +45,36 @@ function checkAtBottom() {
 onMounted(() => feedEl.value?.addEventListener('scroll', checkAtBottom, { passive: true }))
 onBeforeUnmount(() => feedEl.value?.removeEventListener('scroll', checkAtBottom))
 
-watch(() => props.segments.length, async () => {
+watch(() => [props.segments.length, props.segments.at(-1)?.ko, props.segments.at(-1)?.zh], async () => {
   await nextTick()
   if (feedEl.value && isAtBottom.value) {
     feedEl.value.scrollTop = feedEl.value.scrollHeight
   }
 })
+
+function formatTs(ms) {
+  const total = Math.floor(ms / 1000)
+  return `${Math.floor(total / 60).toString().padStart(2, '0')}:${(total % 60).toString().padStart(2, '0')}`
+}
 </script>
 
 <style scoped>
-.feed { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
-.empty { color: #aaa; text-align: center; margin-top: 40px; font-style: italic; }
+.feed { flex: 1; overflow-y: auto; padding: clamp(1rem,2vw,1.5rem); display: flex; flex-direction: column; gap: .8rem; }
+.empty { color: var(--text-muted); text-align: center; margin: auto; display: grid; gap: .35rem; }
+.empty strong { color: var(--text); font-size: 1.1rem; }
 .card {
-  padding: 12px 14px; border-radius: 12px; border-left: 4px solid #5856d6;
-  background: #f8f8fc; animation: fadeUp .3s ease; position: relative;
+  padding: 1rem 1.1rem; border-radius: 16px; border: 1px solid var(--border);
+  border-left: 4px solid var(--accent); background: #fff; position: relative;
 }
-.card.interim { border-left-color: #ff9500; background: #fffcf0; }
-.card.translating { border-left-color: #5856d6; }
-@keyframes fadeUp { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
-.star { position: absolute; top: 10px; right: 12px; background: none; border: none; cursor: pointer; font-size: 16px; opacity: .4; }
+.card.interim { border-left-color: #b78339; background: #fffcf5; }
+.card.error { border-left-color: var(--error); background: #fff9f8; }
+.card-meta { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 5px; padding-right: 27px; color: #77778a; font-size: 11px; }
+.card.interim .card-meta { color: #a65b00; }
+.card.done .card-meta { color: #28704e; }
+.card.error .card-meta { color: #a3332e; }
+.star { position: absolute; top: 4px; right: 5px; background: none; border: none; cursor: pointer; font-size: 1.2rem; opacity: .55; min-height: 44px; min-width: 44px; }
 .star.active { opacity: 1; }
-.ko { font-size: 15px; font-weight: 600; line-height: 1.5; padding-right: 24px; }
-.zh { font-size: 16px; color: #1c1c1e; margin-top: 4px; line-height: 1.55; }
-.zh.pending { color: #aaa; font-style: italic; animation: blink 1s infinite alternate; }
-@keyframes blink { 0%{opacity:1} 100%{opacity:.4} }
+.source { font-size: 1rem; font-weight: 620; line-height: 1.58; padding-right: 24px; white-space: pre-wrap; }
+.target { font-size: 1.08rem; color: var(--text); margin-top: .45rem; line-height: 1.62; white-space: pre-wrap; }
+.target.generating { color: var(--text-muted); }
 </style>

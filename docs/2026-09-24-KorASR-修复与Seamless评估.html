@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KorASR 修复与 Seamless 评估 · 2026-09-24</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, "Microsoft YaHei", sans-serif; color: #202334; background: #f5f6fa; }
+    body { margin: 0; } main { max-width: 920px; margin: 36px auto; padding: 36px 44px; background: white; border-radius: 16px; box-shadow: 0 8px 30px #2023340d; }
+    h1 { font-size: 30px; margin: 0 0 8px; } h2 { font-size: 21px; margin: 34px 0 12px; border-bottom: 1px solid #e9eaf0; padding-bottom: 8px; }
+    p, li { line-height: 1.75; } .date, .muted { color: #666b7c; } .lead { font-size: 18px; font-weight: 600; border-left: 4px solid #5856d6; padding: 12px 16px; background: #f3f2ff; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; } th, td { text-align: left; border-bottom: 1px solid #e9eaf0; padding: 10px 12px; vertical-align: top; line-height: 1.6; } th { background: #f7f7fb; }
+    code { background: #f1f2f5; padding: 2px 5px; border-radius: 4px; } pre { background: #202334; color: #f7f7fa; padding: 14px; overflow-x: auto; border-radius: 9px; }
+    pre code { background: none; padding: 0; } a { color: #403cae; } .note { padding: 12px 16px; border-left: 4px solid #d88128; background: #fff8ec; }
+    @media (max-width: 700px) { main { margin: 0; border-radius: 0; padding: 24px 18px; } table { font-size: 14px; } }
+  </style>
+</head>
+<body><main>
+  <h1>KorASR 修复与 Seamless 评估</h1>
+  <p class="date">2026-09-24 · 本地代码审查与离线验证</p>
+  <p class="lead">一句话总结：先修复字幕落库、精修回看和访问控制；Seamless 值得做韩中录音 A/B 实验，但现有公开结果不足以证明替换后会更准。</p>
+
+  <h2>这文档解决什么问题</h2>
+  <p>记录本轮代码修复的范围、验证结果，以及 Seamless Communication 对课堂长程翻译的实际参考价值。没有真实课堂录音和人工对照译文，本轮不能给出准确率数字。</p>
+
+  <h2>当前服务的两条管线</h2>
+  <table><tr><th>管线</th><th>实现</th><th>用户看到的结果</th></tr>
+    <tr><td>实时</td><td>浏览器 16 kHz PCM → Silero VAD → faster-whisper → Moonshot 流式翻译</td><td>数秒级草稿字幕；韩文先保存，中文稍后更新</td></tr>
+    <tr><td>精修</td><td>原始 PCM 按最长 60 秒窗口重新 ASR → Moonshot 整段翻译，参考上一窗口的韩中对照</td><td>语义分段的稳定译文；历史页可回看并导出</td></tr>
+  </table>
+
+  <h2>本轮修复</h2>
+  <ul>
+    <li>停止或异常断开时等待所有 final 识别任务；先保存韩文，再更新中文。WebSocket 推送失败不再跳过数据库写入。</li>
+    <li>移除前端 8 秒强制断开；收尾超过 30 秒只显示提示。离开录音页时停止麦克风并发送正常停止信号。</li>
+    <li>历史详情和 TXT/Markdown 导出显示精修结果；收尾期间提示状态，完成后自动刷新；删除会话时清理实时句子、精修块和 PCM 文件。</li>
+    <li>API 与 WebSocket 增加访问口令和带期限的 HttpOnly Cookie。未设置随机口令时，数据接口拒绝访问。</li>
+    <li>旧版源文件不再硬编码 Moonshot 密钥；服务启动前检查前端构建是否过期，必要时重新构建。</li>
+    <li>精修参考上一窗口的译文，并明确只输出当前窗口内容；长稿 Whisper 的上一文本条件化改为可配置，默认关闭以降低循环幻觉风险。窗口最多读取 60 秒，停止时补处理积压窗口。</li>
+  </ul>
+  <p class="note">旧密钥仍存在 Git 历史中。必须在 Moonshot 平台吊销并替换该密钥；仅修改当前文件不能让已暴露的密钥失效。</p>
+
+  <h2>Seamless 是否更好</h2>
+  <table><tr><th>问题</th><th>现有证据</th><th>判断</th></tr>
+    <tr><td>能否做韩语语音→中文字幕？</td><td><a href="https://arxiv.org/html/2312.05187">论文语言表</a>覆盖韩语语音输入和普通话文字输出；<a href="https://github.com/facebookresearch/seamless_communication">官方仓库</a>提供 S2TT/流式方案。</td><td>技术上值得试。</td></tr>
+    <tr><td>是否比 Whisper large-v3 + Moonshot 更准？</td><td>论文主要用英语中心方向评测，未与本项目的韩→中管线直接比较。</td><td>目前不知道。不能外推公开平均分数。</td></tr>
+    <tr><td>会自动解决长课堂上下文吗？</td><td><a href="https://arxiv.org/html/2312.05187#S9.SS1">论文长音频段落</a>建议外部降噪、切片和组合。</td><td>不会。断句、窗口衔接与术语管理仍需服务层处理。</td></tr>
+    <tr><td>部署到现有 Windows 服务？</td><td><a href="https://github.com/facebookresearch/seamless_communication#installation">官方安装说明</a>称 fairseq2 预编译包限 Linux x86-64 和 Apple Silicon；M4T v2 另有 Transformers 路径。</td><td>先在隔离环境实验，不直接替换线上服务。</td></tr>
+    <tr><td>许可</td><td><a href="https://github.com/facebookresearch/seamless_communication#license">官方许可证</a>：代码 MIT；M4T 与 Streaming 权重 CC BY-NC 4.0。</td><td>研究对照可行，商业使用需另行审查。</td></tr>
+  </table>
+
+  <h2>怎样判断长程翻译是否真的改善</h2>
+  <ol>
+    <li>选同一批获准使用的真实课堂录音，人工标注韩文原句、关键术语及中文含义；保存录音与标注文件路径。</li>
+    <li>固定音频切分、硬件和计时方式，分别运行当前管线、SeamlessM4T v2 离线模式，以及需要时的 SeamlessStreaming。</li>
+    <li>分开统计韩语转写错误、中文遗漏/错译、术语跨窗口一致性和端到端字幕延迟；译文由懂韩中的评审盲评。</li>
+    <li>记录模型权重、代码提交、GPU、运行时长和每次 API 费用。没有这些记录，不报告“准确率提高了多少”。</li>
+  </ol>
+
+  <h2>验证与下一步</h2>
+  <p>本地 11 项回归测试通过；Vue 生产构建通过；Python 代码通过语法检查。测试里的 ASR、翻译与精修均为 mock，没有调用 Moonshot，也没有在远端启动或更新服务。</p>
+  <p>用户目前没有可用的课堂录音或人工参考文本，因此 A/B 评测暂缓。下一步需轮换旧密钥，为远端部署配置 <code>KORASR_ACCESS_TOKEN</code>；拿到真实录音后再做韩中盲评。新提示词与 Whisper 开关是待验证的改进假设，不能当作已证实的准确率提升。</p>
+</main></body></html>

@@ -11,6 +11,8 @@ _ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
 class Settings(BaseSettings):
     moonshot_api_key: str
+    moonshot_model: str = "kimi-k2.6"
+    moonshot_base_url: str = "https://api.moonshot.cn/v1"
 
     # ASR 后端选择
     #   "faster_whisper" — CTranslate2 后端，CPU/CUDA 通用，4090 服务器走这个
@@ -22,13 +24,15 @@ class Settings(BaseSettings):
     asr_compute_type: str = "float16"
     asr_cpu_threads: int = 0                      # CPU 推理线程数（仅 faster_whisper）；0 = CT2 自动；Mac 设为 P-core 数（M4 Pro 设 8）
     asr_beam_size: int = 5                        # up from 3 — better accuracy, ~same latency on 4090
-    asr_initial_prompt: str = "안녕하세요. 다음은 한국어 강의 및 회의 내용입니다."  # Korean prompt → far fewer TV hallucinations
-    asr_max_buffer_s: float = 8.0
+    asr_initial_prompt: str = ""  # Only add proven course-specific terms; generic text caused prompt echo.
+    asr_initial_prompt_zh: str = ""
+    asr_max_buffer_s: float = 6.0
     asr_min_buffer_s: float = 0.5
     asr_no_speech_threshold: float = 0.6          # was hardcoded 0.7 in transcriber; exposed here
     asr_compression_ratio_threshold: float = 2.2  # discard overly repetitive outputs (hallucination signal)
     asr_log_prob_threshold: float = -1.0           # discard very low-confidence segments
     asr_repetition_penalty: float = 1.1            # penalise repeated tokens at decoder level
+    polish_condition_on_previous_text: bool = False  # avoid long-form Whisper repetition loops
 
     vad_threshold: float = 0.5
     vad_min_silence_ms: int = 600                  # down from 1000 — faster sentence boundary detection
@@ -57,6 +61,8 @@ class Settings(BaseSettings):
         return v
 
     database_url: str = "sqlite:///./data/korasr.db"
+    raw_audio_dir: str = "data/raw"
+    extra_cert_sans: str = ""
 
     # extra="ignore" so env keys consumed elsewhere (RAW_AUDIO_DIR / HF_HOME /
     # EXTRA_CERT_SANS — read via os.environ in handler/start) don't trip pydantic.

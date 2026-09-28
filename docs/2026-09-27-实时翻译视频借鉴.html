@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>实时翻译视频分析与 KorASR 改动 · 2026-09-27</title>
+  <style>
+    :root { font-family: system-ui, "Microsoft YaHei", sans-serif; color: #1c2631; background: #f4f6f8; }
+    body { margin: 0; } main { max-width: 900px; margin: 32px auto; padding: 36px 44px; background: white; border-radius: 14px; }
+    h1 { margin: 0 0 8px; font-size: 28px; } h2 { margin: 32px 0 12px; font-size: 20px; border-bottom: 1px solid #dce2e8; padding-bottom: 7px; }
+    p, li, td { line-height: 1.7; } .date { color: #687684; } .lead { padding: 12px 16px; background: #e9f5f5; border-left: 4px solid #13858e; font-weight: 600; }
+    table { border-collapse: collapse; width: 100%; } th, td { padding: 10px 12px; border-bottom: 1px solid #e0e5e9; text-align: left; vertical-align: top; } th { background: #f4f8f9; }
+    code { background: #eef2f5; padding: 2px 5px; border-radius: 4px; } .note { padding: 12px 16px; background: #fff7e9; border-left: 4px solid #ce8a25; }
+    @media (max-width: 700px) { main { margin: 0; padding: 24px 18px; border-radius: 0; } table { font-size: 13px; } }
+  </style>
+</head>
+<body><main>
+  <h1>实时翻译视频分析与 KorASR 改动</h1>
+  <p class="date">2026-09-27 · 视频：e35eec3063dbbcf1cfb143c2bd35b6b0_raw.mp4 · 时长 95.67 秒</p>
+  <p class="lead">一句话总结：视频展示的是英语到中文的流程动画；已经把可落地的“前文参考、课堂术语、临时与确定字幕分离”接入本地代码，无法从视频推算韩中准确率或真实延迟。</p>
+
+  <h2>这文档解决什么问题</h2>
+  <p>区分视频实际展示的设计与尚未验证的效果，并记录对当前韩中课堂翻译服务的具体改动。</p>
+
+  <h2>视频里能观察到什么</h2>
+  <table><tr><th>时间</th><th>画面/讲解</th><th>对当前系统的判断</th></tr>
+    <tr><td>约 16–31 秒</td><td>示意 200 毫秒音频块上传，随后降噪、回声消除、响度归一化和 VAD。</td><td>当前浏览器按 4096 帧、16 kHz 上传，约 256 毫秒一块，且已有 Silero VAD。视频中的 200 毫秒是传输步长，不是翻译延迟；没有照抄降噪效果。</td></tr>
+    <tr><td>约 34–58 秒</td><td>展示说话中变化的临时识别，稳定后提交完整句，页面保留滑动上下文。</td><td>当前系统已有临时 ASR 和 VAD/最长 8 秒切段；本轮把临时、翻译中、已确定、翻译失败状态明确显示，并防止中断的半句中文写成最终结果。</td></tr>
+    <tr><td>约 62–82 秒</td><td>用前文理解术语和 “It” 指代。</td><td>实时翻译现在读取同一会话最多两句已提交前文，明确要求只翻译当前句；60 秒精修原本就参考上一窗口。</td></tr>
+    <tr><td>约 85–94 秒</td><td>展示专业术语表与带时间戳的字幕。</td><td>新建每节课韩中术语表，开课前或录音中可编辑；只把当前韩文中匹配的术语传给实时翻译和精修。现有消息时间戳现在显示在实时字幕卡片上。</td></tr>
+  </table>
+
+  <h2>本地实现</h2>
+  <ul>
+    <li><code>backend/translation/moonshot.py</code>：有限前文与匹配术语进入实时翻译提示，当前句单独标记。流中断会抛错。</li>
+    <li><code>backend/ws/handler.py</code>：从数据库读取前两句与术语；翻译完整结束才保存中文，否则保留韩文并显示失败状态；精修也读取术语。</li>
+    <li><code>backend/storage/models.py</code>、<code>backend/api/sessions.py</code>：独立术语表及创建、查询、替换接口，旧数据库无需修改已有会话表。</li>
+    <li><code>frontend/src/views/ClassroomView.vue</code>：开课前输入术语，录音中编辑；<code>TranscriptFeed.vue</code>：显示临时/确定状态与时间戳，翻译中不再让整段中文闪烁。</li>
+  </ul>
+
+  <h2>证据边界与验证</h2>
+  <p class="note">这段视频不是连续、可计时的真实课堂录制。它没有提供韩语原声、人工参考译文或运行日志，因此不能证明模型准确率、端到端延迟或所谓“语义稳定检测”。本项目仍以 VAD 与最长 8 秒切段提交稳定句。</p>
+  <p>本地 17 项回归测试、Vue 生产构建、Python 语法检查均通过。测试中的 ASR 与 Moonshot 使用模拟对象，没有调用付费接口；远端服务没有启动或更新。术语表只影响翻译提示，不能修复 ASR 已经听错的韩语词。实际效果仍需真实课堂录音和人工核对。</p>
+</main></body></html>

@@ -13,10 +13,14 @@ import argparse
 import datetime
 import ipaddress
 import os
+import shutil
 import site
 import socket
+import subprocess
 import sys
 from pathlib import Path
+
+from backend.config import settings
 
 # Windows 控制台默认 cp1252，print 任何非 Latin-1 字符（韩文/中文/→）都会
 # UnicodeEncodeError 把整个 request handler 崩掉。强制 stdout/stderr 走 UTF-8。
@@ -72,6 +76,25 @@ CERT_PATH = CERT_DIR / "cert.pem"
 KEY_PATH = CERT_DIR / "key.pem"
 
 
+def _ensure_frontend_build():
+    """Never serve an older SPA after a backend-only service start."""
+    frontend_dir = Path(__file__).resolve().parent / "frontend"
+    dist_index = frontend_dir / "dist" / "index.html"
+    sources = [frontend_dir / "package.json", frontend_dir / "package-lock.json", frontend_dir / "vite.config.js"]
+    sources.extend(p for p in (frontend_dir / "src").rglob("*") if p.is_file())
+    newest_source = max((p.stat().st_mtime for p in sources if p.exists()), default=0)
+    if dist_index.exists() and dist_index.stat().st_mtime >= newest_source:
+        return
+    npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
+    if not npm or not (frontend_dir / "node_modules").exists():
+        raise RuntimeError(
+            "Frontend build is missing or stale. Run 'cd frontend; npm ci; npm run build' "
+            "before starting KorASR."
+        )
+    print("[Frontend] Source is newer than dist; rebuilding...")
+    subprocess.run([npm, "run", "build"], cwd=frontend_dir, check=True)
+
+
 def _add_nvidia_to_path():
     """
     Find NVIDIA CUDA DLL directories installed via pip (nvidia-cublas-cu12 etc.)
@@ -116,7 +139,7 @@ def _local_ips() -> set[str]:
     except Exception:
         pass
     # gethostname 在 Windows 上拿不到 Tailscale/VPN 虚拟网卡 IP，用 env 兜底加上
-    for extra in os.environ.get("EXTRA_CERT_SANS", "").split(","):
+    for extra in settings.extra_cert_sans.split(","):
         extra = extra.strip()
         if not extra:
             continue
@@ -129,7 +152,7 @@ def _local_ips() -> set[str]:
 
 
 def _extra_dns_sans() -> list[str]:
-    raw = os.environ.get("EXTRA_CERT_SANS", "")
+    raw = settings.extra_cert_sans
     out = []
     for token in raw.split(","):
         token = token.strip()
@@ -187,18 +210,20 @@ def generate_cert():
 def main():
     parser = argparse.ArgumentParser(description="Start korAsr with HTTPS")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", default="0.0.0.0", help="Bind address; use 127.0.0.1 behind Tailscale Serve")
     parser.add_argument("--regen-cert", action="store_true", help="Regenerate certificate")
     args = parser.parse_args()
 
     # Must happen BEFORE importing anything CUDA-related
     _add_nvidia_to_path()
+    _ensure_frontend_build()
 
     if not CERT_PATH.exists() or args.regen_cert:
         generate_cert()
     else:
         print(f"[SSL] Using existing certificate ({CERT_PATH})")
 
-    lan_ips = _local_ips() - {"127.0.0.1"}
+    lan_ips = (_local_ips() - {"127.0.0.1"}) if args.host == "0.0.0.0" else set()
     print()
     print("=" * 55)
     print("  Access URLs (accept the browser security warning):")
@@ -209,13 +234,23 @@ def main():
     print()
 
     import uvicorn
-    uvicorn.run(
-        "backend.main:app",
-        host="0.0.0.0",
+    server_options = dict(
+        host=args.host,
         port=args.port,
         ssl_certfile=str(CERT_PATH),
         ssl_keyfile=str(KEY_PATH),
+        timeout_graceful_shutdown=30,
     )
+    if os.name == "nt":
+        # Windows Proactor transports can raise WinError 10054 in
+        # _call_connection_lost before detaching from asyncio.Server. The
+        # server then hangs in wait_closed() after Ctrl+C. Selector avoids
+        # that transport path while supporting this HTTP/WebSocket server.
+        import asyncio
+        config = uvicorn.Config("backend.main:app", loop="none", **server_options)
+        asyncio.run(uvicorn.Server(config).serve(), loop_factory=asyncio.SelectorEventLoop)
+    else:
+        uvicorn.run("backend.main:app", **server_options)
 
 
 if __name__ == "__main__":

@@ -1,12 +1,13 @@
 <template>
   <div class="notes-pad">
-    <div class="header">
-      <span>📝 Notes</span>
-      <span class="saved-hint" v-if="savedHint">Saved</span>
+    <div v-if="showHeader" class="header">
+      <span>课堂笔记</span>
+      <span class="saved-hint">输入后自动保存</span>
     </div>
     <textarea
       class="editor"
-      placeholder="Record key points, questions, ideas..."
+      placeholder="记录重点、问题或待查证的内容…"
+      aria-label="课堂笔记"
       :value="modelValue"
       @input="onInput"
     ></textarea>
@@ -14,29 +15,26 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
-const props = defineProps(['modelValue'])
+defineProps({
+  modelValue: String,
+  showHeader: { type: Boolean, default: true },
+})
 const emit = defineEmits(['update:modelValue'])
-const savedHint = ref(false)
-let hintTimer = null
 
 function onInput(e) {
   emit('update:modelValue', e.target.value)
-  clearTimeout(hintTimer)
-  savedHint.value = false
-  hintTimer = setTimeout(() => { savedHint.value = true }, 1200)
 }
 </script>
 
 <style scoped>
-.notes-pad { display: flex; flex-direction: column; height: 100%; border-left: 1px solid #f0f0f0; }
+.notes-pad { display: flex; flex-direction: column; height: 100%; min-height: 0; background: #fff; }
 .header {
-  padding: 12px 16px; background: #fafafa; border-bottom: 1px solid #f0f0f0;
+  padding: .75rem 1rem; background: #fff; border-bottom: 1px solid var(--border);
   font-size: 13px; font-weight: 700; display: flex; justify-content: space-between;
 }
-.saved-hint { font-size: 12px; color: #34c759; font-weight: 400; }
+.saved-hint { font-size: .75rem; color: var(--text-muted); font-weight: 450; }
 .editor {
-  flex: 1; padding: 14px 16px; border: none; outline: none; resize: none;
-  font-size: 13px; line-height: 1.7; font-family: inherit; background: #fff;
+  flex: 1; padding: 1rem; border: none; outline: none; resize: none;
+  font-size: .96rem; line-height: 1.7; font-family: inherit; background: #fff;
 }
 </style>

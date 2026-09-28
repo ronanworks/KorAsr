@@ -1,3 +1,4 @@
+import os
 import asyncio
 import json
 import numpy as np
@@ -24,7 +25,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 asr_model = WhisperModel("large-v3", device=device, compute_type="float16")
 
 # 【填写你的月之暗面 API KEY】
-MOONSHOT_API_KEY = "sk-5uFTqm4JRafh7aEipdiit9j2fe2KCXmjZ09x74gpcltXNAJL" 
+MOONSHOT_API_KEY = os.environ["MOONSHOT_API_KEY"]
 client = OpenAI(
     api_key=MOONSHOT_API_KEY,
     base_url="https://api.moonshot.cn/v1",
