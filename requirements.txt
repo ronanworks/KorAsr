@@ -3,7 +3,7 @@ uvicorn[standard]>=0.29.0
 faster-whisper>=1.1.0
 # Speaker voiceprints (CAM++ ONNX); faster-whisper already pulls it in for its VAD
 onnxruntime>=1.14.0
-# Mandarin ASR (SenseVoice) and turn-level diarization; bundles its own onnxruntime DLL
+# Mandarin ASR (SenseVoice); bundles its own onnxruntime DLL
 sherpa-onnx==1.13.8
 # Apple Silicon Mac 专用：MLX 后端，走 M-series GPU (Metal)，比 CPU faster-whisper 快 3-5×
 mlx-whisper>=0.4.0; platform_machine == 'arm64' and sys_platform == 'darwin'

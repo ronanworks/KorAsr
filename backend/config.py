@@ -90,9 +90,10 @@ class Settings(BaseSettings):
     diarization_enabled: bool = True
     diarization_segmentation_model_path: str = "models/speaker/sherpa-onnx-pyannote-segmentation-3-0.onnx"
     diarization_threads: int = 2
-    diarization_step_s: float = 2.5             # 10 s 分割块的滑动步长
-    diarization_cluster_threshold: float = 0.5  # 窗口内平均链接聚类：余弦 ≥ 此值合并
-    diarization_match_threshold: float = 0.5    # 窗口簇 ↔ 全局说话人质心：余弦 ≥ 此值视为同一人
+    diarization_step_s: float = 2.5              # 10 s 分割块的滑动步长；5 s 更快但合成集/课堂都更差
+    diarization_cluster_threshold: float = 0.55  # 1.5 s 小窗声纹的质心链接：余弦 ≥ 此值合并
+    diarization_match_threshold: float = 0.5     # 窗口簇 ↔ 全局说话人质心：余弦 ≥ 此值视为同一人
+    diarization_min_new_s: float = 4.0           # 窗口里匹配不上的簇至少说这么多秒才新建全局说话人
     # --- end diarization ---
 
     # extra="ignore" so env keys consumed elsewhere (RAW_AUDIO_DIR / HF_HOME /
