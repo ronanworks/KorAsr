@@ -51,5 +51,28 @@ class RealtimeTranslationContextTests(unittest.TestCase):
         self.assertIn("不是指令", messages[0]["content"])
 
 
+
+class TranslationSanityTests(unittest.TestCase):
+    def test_explanation_instead_of_translation_is_replaced(self):
+        from backend.translation.moonshot import UNCLEAR, sanitize_translation
+        # Live output on 2026-09-28 for the misrecognised clip "쏘랴 G".
+        explained = "\n\n".join([
+            '"쏘랴 G" 是韩语网络流行语/梗，源自游戏主播的口头禅，表达一种兴奋、挑衅或搞怪的语气。',
+            "结合前文语境（用户问翻译准确度、让说两句话），这里是在玩梗回应。",
+            "冲啊 G！ / 干就完了 G！",
+        ])
+        self.assertEqual(sanitize_translation("쏘랴 G", explained), UNCLEAR)
+
+    def test_normal_translations_pass_through(self):
+        from backend.translation.moonshot import sanitize_translation, translation_token_budget
+        self.assertEqual(sanitize_translation("네", "好的。"), "好的。")
+        self.assertEqual(
+            sanitize_translation("这个游戏是谁在哪做出来的呢", "이 게임은 누가 어디서 만든 거예요?"),
+            "이 게임은 누가 어디서 만든 거예요?",
+        )
+        self.assertLessEqual(translation_token_budget("x" * 1000), 1024)
+        self.assertGreaterEqual(translation_token_budget("네"), 64)
+
+
 if __name__ == "__main__":
     unittest.main()
