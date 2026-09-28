@@ -78,6 +78,36 @@ class OnlineSpeakerTracker:
         A merged index stays valid for earlier segments; resolve() gives its survivor."""
         return len(self._means)
 
+    def centroids(self) -> tuple[list[int], np.ndarray]:
+        """Active (not merged-away) speaker indices and their unit centroids, shape [n, dim]."""
+        active = [i for i in range(len(self._means)) if i not in self._alias]
+        if not active:
+            return [], np.zeros((0, 0), dtype=np.float32)
+        return active, np.stack([self._centroid(i) for i in active]).astype(np.float32)
+
+    def export_state(self) -> dict:
+        """JSON-serialisable snapshot, so a paused class resumes with the same speaker numbers."""
+        return {
+            "means": [np.round(m, 6).tolist() for m in self._means],
+            "weights": [float(w) for w in self._weights],
+            "alias": {str(k): int(v) for k, v in self._alias.items()},
+            "last": self._last,
+        }
+
+    def load_state(self, state: dict | None) -> None:
+        """Restore export_state() output; malformed input leaves the tracker empty."""
+        try:
+            means = [np.asarray(m, dtype=np.float32) for m in (state or {}).get("means", [])]
+            weights = [float(w) for w in (state or {}).get("weights", [])]
+            alias = {int(k): int(v) for k, v in (state or {}).get("alias", {}).items()}
+            last = (state or {}).get("last")
+        except (TypeError, ValueError):
+            return
+        if len(means) != len(weights) or any(m.ndim != 1 for m in means):
+            return
+        self._means, self._weights, self._alias = means, weights, alias
+        self._last = int(last) if isinstance(last, int) and 0 <= last < len(means) else None
+
     def resolve(self, index: int) -> int:
         """Map an index that was merged away to the index that now represents that speaker."""
         while index in self._alias:
