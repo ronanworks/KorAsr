@@ -24,11 +24,12 @@
     <div class="detail" v-else>
       <div class="detail-header">
         <button @click="returnToList" class="back-btn">← 返回列表</button>
-        <div class="detail-identity"><h2>{{ selectedSession.session.name }}</h2><span>{{ sourceLabel }} → {{ targetLabel }}</span></div>
+        <div class="detail-identity"><h2>{{ selectedSession.session.name }}</h2><span>{{ directionLabel }}</span></div>
         <button class="btn-summary" @click="triggerSummary" :disabled="summaryLoading">
           {{ summaryLoading ? '正在生成…' : '生成总结' }}
         </button>
       </div>
+      <p v-if="renameError" class="rename-error" role="alert">{{ renameError }}</p>
 
       <div class="detail-body">
         <div class="segments">
@@ -46,19 +47,17 @@
             <h4>精修译文</h4>
             <span>基于录音重新识别和翻译 · {{ targetLabel }}</span>
           </div>
-          <div v-if="!selectedSession.polished_chunks?.length" class="section-empty">这节课还没有精修译文。</div>
-          <div
-            v-for="chunk in selectedSession.polished_chunks || []"
+          <OutlinePanel class="history-outline" :outline="historyOutline" :lang="targetLang" default-open :limit-height="false" />
+          <div v-if="!historyChunks.length" class="section-empty">这节课还没有精修译文。</div>
+          <PolishCard
+            v-for="chunk in historyChunks"
             :key="chunk.id"
-            class="polish-card"
-          >
-            <span class="polish-label">第 {{ chunk.chunk_index + 1 }} 段 · 已精修</span>
-            <p class="polish-zh" :lang="selectedSession.session.target_lang || 'zh'">{{ chunk.zh_polished }}</p>
-            <details>
-              <summary>查看{{ sourceLabel }}原文</summary>
-              <p class="polish-ko" :lang="selectedSession.session.source_lang || 'ko'">{{ chunk.ko_combined }}</p>
-            </details>
-          </div>
+            :chunk="chunk"
+            :source-lang="sourceLang"
+            :target-lang="targetLang"
+            :speakers="historySpeakers"
+            @rename-speaker="renameHistorySpeaker"
+          />
           <div class="section-heading live-heading"><h4>实时字幕</h4></div>
           <div
             v-for="seg in selectedSession.segments"
@@ -66,9 +65,13 @@
             class="seg-card"
             :class="{ starred: seg.is_starred }"
           >
-            <span class="seg-ts">{{ formatTs(seg.timestamp_ms) }}</span>
-            <div class="seg-ko" :lang="selectedSession.session.source_lang || 'ko'">{{ seg.ko_text }}</div>
-            <div class="seg-zh" :lang="selectedSession.session.target_lang || 'zh'">{{ seg.zh_text }}</div>
+            <div class="seg-head">
+              <span class="seg-ts">{{ formatTs(seg.timestamp_ms) }}</span>
+              <SpeakerChip v-if="seg.speaker != null" :index="seg.speaker" :speakers="historySpeakers" @rename="renameHistorySpeaker" />
+              <DirectionBadge :lang="seg.lang" :target-lang="seg.target_lang" :session-source="sourceLang" :session-target="targetLang" />
+            </div>
+            <div class="seg-ko" :lang="segLangs(seg).spoken">{{ seg.ko_text }}</div>
+            <div class="seg-zh" :lang="segLangs(seg).target">{{ seg.zh_text }}</div>
           </div>
         </div>
         <div class="summary-panel" v-if="selectedSession.session.summary">
@@ -85,8 +88,14 @@ import { ref, computed, onMounted, watch } from 'vue'
 import axios from 'axios'
 import SessionHistory from '../components/SessionHistory.vue'
 import MaterialsPanel from '../components/MaterialsPanel.vue'
+import PolishCard from '../components/PolishCard.vue'
+import OutlinePanel from '../components/OutlinePanel.vue'
+import SpeakerChip from '../components/SpeakerChip.vue'
+import DirectionBadge from '../components/DirectionBadge.vue'
 import { useSessionStore } from '../stores/session'
-import { languageLabel } from '../utils/languages.js'
+import { languageLabel, resolveItemLangs, sessionDirectionLabel } from '../utils/languages.js'
+import { normalizeOutline, normalizePolishChunk } from '../utils/polish.js'
+import { normalizeSpeakerName, speakersFromList } from '../utils/speakers.js'
 
 const liveStore = useSessionStore()
 const sessions = ref([])
@@ -95,14 +104,25 @@ const selectedSession = ref(null)
 const summaryLoading = ref(false)
 const recording = ref(null)
 const recordingState = ref('idle')
+const renameError = ref('')
 let detailLoadSeq = 0
 function returnToList() {
   detailLoadSeq += 1
   selectedSession.value = null
   recording.value = null
+  renameError.value = ''
 }
-const sourceLabel = computed(() => languageLabel(selectedSession.value?.session?.source_lang || 'ko'))
-const targetLabel = computed(() => languageLabel(selectedSession.value?.session?.target_lang || 'zh'))
+const sourceLang = computed(() => selectedSession.value?.session?.source_lang || 'ko')
+const targetLang = computed(() => selectedSession.value?.session?.target_lang || 'zh')
+const targetLabel = computed(() => languageLabel(targetLang.value))
+const directionLabel = computed(() =>
+  sessionDirectionLabel(sourceLang.value, targetLang.value, selectedSession.value?.session?.bidirectional))
+const historySpeakers = computed(() => speakersFromList(selectedSession.value?.speakers))
+const historyChunks = computed(() => (selectedSession.value?.polished_chunks || []).map(normalizePolishChunk))
+const historyOutline = computed(() => normalizeOutline(selectedSession.value?.session?.live_outline))
+function segLangs(seg) {
+  return resolveItemLangs(seg.lang, seg.target_lang, sourceLang.value, targetLang.value)
+}
 const recordingStatusText = computed(() => {
   if (recordingState.value === 'loading') return '正在检查服务器上的录音…'
   if (recordingState.value === 'error') return '暂时无法确认录音状态。'
@@ -139,6 +159,7 @@ async function loadSession(id) {
   const res = await axios.get(`/api/sessions/${id}`)
   if (request !== detailLoadSeq) return
   selectedSession.value = res.data
+  renameError.value = ''
   recording.value = null
   recordingState.value = 'loading'
   try {
@@ -171,6 +192,29 @@ async function triggerSummary() {
     selectedSession.value.session.summary = res.data.summary
   } finally {
     summaryLoading.value = false
+  }
+}
+
+// Same PUT as the live classroom; the list updates at once and is replaced by
+// the server's list, or restored if the save fails.
+async function renameHistorySpeaker(index, name) {
+  const detail = selectedSession.value
+  if (!detail) return
+  const sessionId = detail.session.id
+  const previous = Array.isArray(detail.speakers) ? detail.speakers : []
+  const cleaned = normalizeSpeakerName(name)
+  renameError.value = ''
+  detail.speakers = previous.some(item => item.index === index)
+    ? previous.map(item => (item.index === index ? { ...item, name: cleaned } : item))
+    : [...previous, { index, name: cleaned, segment_count: 0 }]
+  const stillShown = () => selectedSession.value?.session?.id === sessionId
+  try {
+    const list = await liveStore.renameSpeaker(index, name, sessionId)
+    if (stillShown() && list.length) selectedSession.value.speakers = list
+  } catch (error) {
+    if (!stillShown()) return
+    selectedSession.value.speakers = previous
+    renameError.value = `说话人名称保存失败：${error.response?.data?.detail || error.message}`
   }
 }
 
@@ -218,17 +262,14 @@ function formatTs(ms) {
 .section-heading span, .section-empty { color: #77778a; font-size: 12px; }
 .section-empty { padding: 10px 0 18px; }
 .live-heading { margin-top: 16px; }
-.polish-card { padding: 1.2rem; border-radius: 16px; background: #fff; border: 1px solid var(--border); border-left: 4px solid #7994c5; }
-.polish-label { color: var(--accent); font-size: .78rem; font-weight: 700; }
-.polish-zh { font-size: 17px; line-height: 1.75; margin: 8px 0 10px; white-space: pre-wrap; }
-.polish-card details { color: #626270; font-size: 12px; }
-.polish-card summary { cursor: pointer; }
-.polish-ko { line-height: 1.6; white-space: pre-wrap; }
-.seg-card { padding: .85rem 1rem; border-radius: 13px; background: #fff; border: 1px solid var(--border); border-left: 4px solid var(--accent); }
+.rename-error { margin: 0; padding: .6rem clamp(1rem,3vw,2.5rem); color: #8a2c29; background: #fff1f0; border-bottom: 1px solid #edb8b5; font-size: .85rem; }
+.history-outline { flex: none; border: 1px solid var(--border); border-radius: 16px; overflow: hidden; }
+.seg-card { padding: .85rem 1rem; border-radius: 13px; background: #fff; border: 1px solid var(--border); border-left: 4px solid var(--accent); min-width: 0; }
 .seg-card.starred { border-left-color: #ff9500; background: #fffcf0; }
+.seg-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
 .seg-ts { font-size: 11px; color: #c7c7cc; }
-.seg-ko { font-size: 14px; font-weight: 600; margin-top: 3px; }
-.seg-zh { font-size: 13px; color: #636366; margin-top: 3px; }
+.seg-ko { font-size: 14px; font-weight: 600; margin-top: 3px; overflow-wrap: anywhere; }
+.seg-zh { font-size: 13px; color: #636366; margin-top: 3px; overflow-wrap: anywhere; }
 .summary-panel { width: min(320px,30vw); border-left: 1px solid var(--border); padding: 1.25rem; overflow-y: auto; background: #fff; }
 .summary-panel h4 { margin: 0 0 12px; font-size: .94rem; color: var(--accent); }
 .summary-content { font-size: 13px; line-height: 1.7; white-space: pre-wrap; margin: 0; font-family: inherit; }

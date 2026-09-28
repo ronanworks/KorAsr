@@ -10,6 +10,7 @@
         :elapsed-formatted="store.elapsedFormatted"
         :source-lang="store.sourceLang"
         :target-lang="store.targetLang"
+        :bidirectional="store.bidirectional"
         :recording-status="store.recordingStatus"
         :recording-info="store.recordingInfo"
         :session-id="store.currentSessionId"
@@ -19,6 +20,7 @@
         @glossary="onGlossary"
       />
       <div v-if="micError" class="mic-error" role="alert">{{ micError }}</div>
+      <div v-if="speakerError" class="mic-error" role="alert">{{ speakerError }}</div>
       <details v-if="micProcessingStatus" class="mic-diagnostics">
         <summary>麦克风状态 · {{ micProcessingStatus.device }}</summary>
         <div>
@@ -33,7 +35,8 @@
           <div class="live-heading">
             <p class="eyebrow">LIVE TRANSLATION</p>
             <h1>{{ isMobile && auxiliaryPanel ? auxiliaryPanelLabel : '实时字幕' }}</h1>
-            <p>{{ languageLabel(store.sourceLang) }}原文与{{ languageLabel(store.targetLang) }}译文持续更新。已确定的句子会保存在课堂记录中。</p>
+            <p v-if="store.bidirectional">自动识别{{ languageLabel(store.sourceLang) }}和{{ languageLabel(store.targetLang) }}发言并互译。已确定的句子会保存在课堂记录中。</p>
+            <p v-else>{{ languageLabel(store.sourceLang) }}原文与{{ languageLabel(store.targetLang) }}译文持续更新。已确定的句子会保存在课堂记录中。</p>
           </div>
           <div class="panel-controls" role="group" aria-label="课堂视图">
             <button :class="{ selected: !auxiliaryPanel }" :aria-pressed="!auxiliaryPanel" @click="auxiliaryPanel = null">字幕</button>
@@ -44,11 +47,21 @@
         </header>
         <div class="live-body" :class="{ 'with-panel': auxiliaryPanel }">
           <section class="transcript-panel" aria-label="实时双语字幕">
-            <TranscriptFeed :segments="store.segments" :source-lang="store.sourceLang" :target-lang="store.targetLang" @star="store.toggleStar" />
+            <TranscriptFeed :segments="store.segments" :source-lang="store.sourceLang" :target-lang="store.targetLang" :speakers="store.speakers" @star="store.toggleStar" @rename-speaker="onRenameSpeaker" />
           </section>
           <aside v-if="auxiliaryPanel" class="auxiliary-panel" :aria-label="auxiliaryPanelLabel">
             <div class="auxiliary-top"><strong>{{ auxiliaryPanelLabel }}</strong><button @click="auxiliaryPanel = null">{{ isMobile ? '返回字幕' : '关闭面板' }}</button></div>
-            <PolishFeed v-if="auxiliaryPanel === 'polish'" :chunks="store.polishChunks" :source-lang="store.sourceLang" :target-lang="store.targetLang" :show-header="false" />
+            <PolishFeed
+              v-if="auxiliaryPanel === 'polish'"
+              :chunks="store.polishChunks"
+              :source-lang="store.sourceLang"
+              :target-lang="store.targetLang"
+              :bidirectional="store.bidirectional"
+              :speakers="store.speakers"
+              :outline="store.outline"
+              :show-header="false"
+              @rename-speaker="onRenameSpeaker"
+            />
             <NotesPad v-else-if="auxiliaryPanel === 'notes'" v-model="notesModel" :show-header="false" class="auxiliary-fill" />
             <div v-else class="materials-scroll"><MaterialsPanel :session-id="store.currentSessionId" :is-recording="store.isRecording" compact @changed="materialsCount = $event" /></div>
           </aside>
@@ -64,7 +77,7 @@
         <p>字幕、精修译文、笔记与录音保存在课堂记录中。录音文件会长期保留，需手动删除。</p>
         <div class="completion-meta">
           <span>{{ store.sessionName }}</span>
-          <span>{{ languageLabel(store.sourceLang) }} → {{ languageLabel(store.targetLang) }}</span>
+          <span>{{ sessionDirectionLabel(store.sourceLang, store.targetLang, store.bidirectional) }}</span>
           <span>录音 {{ store.elapsedFormatted }}</span>
         </div>
         <p v-if="micError" class="mic-error-inline" role="alert">{{ micError }}</p>
@@ -93,6 +106,10 @@
                 <div><label for="class-source">原文语言</label><select id="class-source" v-model="newSourceLang"><option value="ko">韩语</option><option value="zh">中文</option></select></div>
                 <div><label for="class-target">翻译为</label><select id="class-target" v-model="newTargetLang"><option v-for="lang in targetOptions" :key="lang" :value="lang">{{ languageLabel(lang) }}</option></select></div>
               </div>
+              <label class="processing-toggle" for="class-bidirectional">
+                <input id="class-bidirectional" v-model="newBidirectional" type="checkbox" :disabled="starting" aria-describedby="class-bidirectional-help" />
+                <span><strong>自动识别双语</strong><small id="class-bidirectional-help">{{ bidirectionalHelper }}</small></span>
+              </label>
               <label for="class-glossary">术语表 <span class="optional">可选，每行一条</span></label>
               <textarea id="class-glossary" v-model="newGlossaryText" rows="3" :placeholder="sourceExample + '=' + targetExample"></textarea>
               <p class="helper">{{ languageLabel(newSourceLang) }}术语={{ languageLabel(newTargetLang) }}指定译法；课堂中仍可补充。</p>
@@ -126,7 +143,7 @@
           <section v-if="drafts.length" class="surface drafts-card">
             <h2>继续未开录的课堂</h2>
             <button v-for="draft in drafts" :key="draft.id" class="draft-choice" :class="{ active: draft.id === store.currentSessionId }" :disabled="starting || preparing" @click="selectDraft(draft.id)">
-              <strong>{{ draft.name }}</strong><span>{{ languageLabel(draft.source_lang) }} → {{ languageLabel(draft.target_lang) }}</span>
+              <strong>{{ draft.name }}</strong><span>{{ sessionDirectionLabel(draft.source_lang, draft.target_lang, draft.bidirectional) }}</span>
             </button>
           </section>
         </aside>
@@ -157,7 +174,7 @@ import TranscriptFeed from '../components/TranscriptFeed.vue'
 import PolishFeed from '../components/PolishFeed.vue'
 import NotesPad from '../components/NotesPad.vue'
 import MaterialsPanel from '../components/MaterialsPanel.vue'
-import { languageLabel, TARGETS_BY_SOURCE } from '../utils/languages.js'
+import { languageLabel, sessionDirectionLabel, TARGETS_BY_SOURCE } from '../utils/languages.js'
 
 const store = useSessionStore()
 let micStream = null
@@ -170,6 +187,8 @@ let audioBlocksSent = 0
 let audioMode = null
 let viewUnmounted = false
 const micError = ref('')
+const speakerError = ref('')
+let speakerErrorTimeout = null
 const browserProcessingEnabled = ref(true)
 const micProcessingStatus = ref(null)
 
@@ -209,6 +228,7 @@ function stopMicrophone() {
 onUnmounted(() => {
   viewUnmounted = true
   startAttempt += 1
+  clearTimeout(speakerErrorTimeout)
   if (store.isRecording) store.stopSession()
   stopMicrophone()
 })
@@ -234,6 +254,10 @@ const newSessionName = ref(`课堂 · ${today}`)
 const newGlossaryText = ref('')
 const newSourceLang = ref('ko')
 const newTargetLang = ref('zh')
+const newBidirectional = ref(true)
+const bidirectionalHelper = computed(() => newBidirectional.value
+  ? `检测到${languageLabel(newTargetLang.value)}发言时，自动翻译成${languageLabel(newSourceLang.value)}。`
+  : `关闭时全部按${languageLabel(newSourceLang.value)}识别，翻译成${languageLabel(newTargetLang.value)}。`)
 const targetOptions = computed(() => TARGETS_BY_SOURCE[newSourceLang.value] || [])
 const sourceExample = computed(() => newSourceLang.value === 'ko' ? '선물' : '期货')
 const targetExample = computed(() => ({ ko: '선물', zh: '期货', en: 'futures', ru: 'фьючерсы' })[newTargetLang.value])
@@ -284,6 +308,7 @@ function syncDraftForm() {
   newSessionName.value = store.sessionName
   newSourceLang.value = store.sourceLang
   newTargetLang.value = store.targetLang
+  newBidirectional.value = store.bidirectional
   newGlossaryText.value = formatGlossary(store.glossaryTerms)
 }
 async function refreshDrafts() {
@@ -321,11 +346,12 @@ async function savePreparation() {
   }
   preparing.value = true
   try {
+    const mode = { bidirectional: newBidirectional.value }
     if (isPrepared.value) {
-      await store.updatePreparedSession(newSessionName.value.trim(), terms, newSourceLang.value, newTargetLang.value)
+      await store.updatePreparedSession(newSessionName.value.trim(), terms, newSourceLang.value, newTargetLang.value, mode)
       prepMessage.value = '课堂设置已保存。'
     } else {
-      await store.prepareSession(newSessionName.value.trim(), terms, newSourceLang.value, newTargetLang.value)
+      await store.prepareSession(newSessionName.value.trim(), terms, newSourceLang.value, newTargetLang.value, mode)
       prepMessage.value = '课堂已保存，现在可以上传材料。'
     }
     await refreshDrafts()
@@ -341,8 +367,10 @@ function newClass() {
   newSessionName.value = `课堂 · ${today}`
   newSourceLang.value = 'ko'
   newTargetLang.value = 'zh'
+  newBidirectional.value = true
   newGlossaryText.value = ''
   micError.value = ''
+  speakerError.value = ''
   micProcessingStatus.value = null
   prepError.value = ''
   prepMessage.value = ''
@@ -376,7 +404,10 @@ async function beginRecording() {
     // AudioContext before awaiting any server call.
     await prepareMicrophone(browserProcessingEnabled.value)
     if (attempt !== startAttempt || viewUnmounted) { stopMicrophone(); return }
-    await store.updatePreparedSession(newSessionName.value.trim(), terms, newSourceLang.value, newTargetLang.value)
+    await store.updatePreparedSession(
+      newSessionName.value.trim(), terms, newSourceLang.value, newTargetLang.value,
+      { bidirectional: newBidirectional.value },
+    )
     if (attempt !== startAttempt || viewUnmounted) { stopMicrophone(); return }
     await store.startRecording(store.currentSessionId)
     connected = true
@@ -548,6 +579,20 @@ async function attachMicrophone() {
 }
 
 function onStop() { store.stopSession() }
+
+// Speaker rename (教授 / 我 / 同学A): non-blocking error line, since an alert
+// would pause the page's event loop while audio is streaming.
+async function onRenameSpeaker(index, name) {
+  clearTimeout(speakerErrorTimeout)
+  speakerError.value = ''
+  try {
+    await store.renameSpeaker(index, name)
+  } catch (error) {
+    if (viewUnmounted) return
+    speakerError.value = `说话人名称保存失败：${error.response?.data?.detail || error.message}`
+    speakerErrorTimeout = setTimeout(() => { speakerError.value = '' }, 6000)
+  }
+}
 
 async function onRename(name) {
   if (!store.currentSessionId || !name.trim() || name.trim() === store.sessionName) return

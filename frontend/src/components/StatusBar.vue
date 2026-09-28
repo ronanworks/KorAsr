@@ -8,7 +8,7 @@
         <span v-if="isRecording" class="timer">录音 {{ elapsedFormatted }}</span>
       </div>
       <div class="session-subline">
-        <span>{{ languageLabel(sourceLang) }} → {{ languageLabel(targetLang) }}</span>
+        <span :title="directionTitle">{{ sessionDirectionLabel(sourceLang, targetLang, bidirectional) }}</span>
         <span aria-hidden="true">·</span>
         <span role="status">{{ recordingText }}</span>
         <span v-if="recordingInfo?.low_disk_warning" class="storage-warning" role="alert">服务器磁盘空间不足，请及时下载并清理旧录音</span>
@@ -28,14 +28,19 @@
 
 <script setup>
 import { computed } from 'vue'
-import { languageLabel } from '../utils/languages.js'
+import { languageLabel, sessionDirectionLabel } from '../utils/languages.js'
 
 const props = defineProps({
   isRecording: Boolean, isConnected: Boolean, isFinalizing: Boolean, finalizeWarning: Boolean,
   sessionName: String, elapsedFormatted: String, sourceLang: String, targetLang: String,
+  bidirectional: Boolean,
   recordingStatus: String, sessionId: String, recordingInfo: Object,
 })
 defineEmits(['stop', 'summary', 'rename', 'glossary'])
+
+const directionTitle = computed(() => props.bidirectional
+  ? `自动识别双语：${languageLabel(props.sourceLang)}译成${languageLabel(props.targetLang)}，${languageLabel(props.targetLang)}发言译成${languageLabel(props.sourceLang)}`
+  : `${languageLabel(props.sourceLang)}译成${languageLabel(props.targetLang)}`)
 
 const recordingText = computed(() => {
   switch (props.recordingStatus) {

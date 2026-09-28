@@ -2,7 +2,7 @@
   <article class="history-item">
     <button class="open-session" type="button" @click="$emit('select', session.id)">
       <span class="title">{{ session.name }}</span>
-      <span class="meta">{{ formatDate(session.started_at) }} · {{ languageLabel(session.source_lang || 'ko') }} → {{ languageLabel(session.target_lang || 'zh') }}</span>
+      <span class="meta">{{ formatDate(session.started_at) }} · {{ sessionDirectionLabel(session.source_lang || 'ko', session.target_lang || 'zh', session.bidirectional) }}</span>
       <span class="meta">{{ session.duration_seconds ? formatDuration(session.duration_seconds) : '未结束' }} · {{ session.segment_count }} 段字幕</span>
     </button>
     <div class="actions">
@@ -15,7 +15,7 @@
 </template>
 
 <script setup>
-import { languageLabel } from '../utils/languages.js'
+import { sessionDirectionLabel } from '../utils/languages.js'
 defineProps(['session'])
 defineEmits(['select', 'delete'])
 function formatDate(iso) {

@@ -2,15 +2,27 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import axios from 'axios'
+import { isSpeakerIndex, mergeSpeakerList, normalizeSpeakerName, SPEAKER_NAME_MAX } from '../utils/speakers.js'
+import { normalizeOutline, normalizePolishChunk, upsertPolishChunk } from '../utils/polish.js'
+import { mergeSegmentUpdate } from '../utils/segments.js'
+
+// Trailing option of prepare/update: { bidirectional } or a plain boolean.
+function bidirectionalOption(options) {
+  if (typeof options === 'boolean') return options
+  return typeof options?.bidirectional === 'boolean' ? options.bidirectional : undefined
+}
 
 export const useSessionStore = defineStore('session', () => {
   const currentSessionId = ref(null)
   const sessionName = ref('')
   const segments = ref([])
-  const polishChunks = ref([])    // 60s 一批的 LLM 精修翻译块
+  const polishChunks = ref([])    // 60s 一批的 LLM 精修翻译块（含本分钟要点与分说话人 runs）
   const glossaryTerms = ref([])
   const sourceLang = ref('ko')
   const targetLang = ref('zh')
+  const bidirectional = ref(true) // 自动识别双语：目标语言的发言反向翻译成源语言
+  const speakers = ref({})        // 说话人 index → { index, name }
+  const outline = ref(null)       // 课堂脉络 { text, throughMs, updatedAt }
   const recordingStatus = ref('idle')
   const recordingInfo = ref(null)
   const isRecording = ref(false)
@@ -33,14 +45,21 @@ export const useSessionStore = defineStore('session', () => {
     return `${m}:${s}`
   })
 
-  async function prepareSession(name, terms = [], source = 'ko', target = 'zh') {
-    const res = await axios.post('/api/sessions', { name, glossary_terms: terms, source_lang: source, target_lang: target })
+  // Bidirectional defaults to true (contract §1).
+  async function prepareSession(name, terms = [], source = 'ko', target = 'zh', options = {}) {
+    const twoWay = bidirectionalOption(options) ?? true
+    const res = await axios.post('/api/sessions', {
+      name, glossary_terms: terms, source_lang: source, target_lang: target, bidirectional: twoWay,
+    })
     clearTimeout(notesSaveTimeout)
     currentSessionId.value = res.data.id
     sessionName.value = name
     glossaryTerms.value = terms
     sourceLang.value = source
     targetLang.value = target
+    bidirectional.value = twoWay
+    speakers.value = {}
+    outline.value = null
     recordingStatus.value = 'prepared'
     recordingInfo.value = null
     segments.value = []
@@ -63,6 +82,9 @@ export const useSessionStore = defineStore('session', () => {
     sessionName.value = data.session.name
     sourceLang.value = data.session.source_lang || 'ko'
     targetLang.value = data.session.target_lang || 'zh'
+    bidirectional.value = data.session.bidirectional !== false
+    speakers.value = mergeSpeakerList({}, data.speakers, { authoritative: true })
+    outline.value = normalizeOutline(data.session.live_outline)
     glossaryTerms.value = glossary.data.terms || []
     notes.value = data.session.notes || ''
     recordingStatus.value = 'prepared'
@@ -76,12 +98,14 @@ export const useSessionStore = defineStore('session', () => {
     finalizeWarning.value = false
   }
 
-  async function updatePreparedSession(name, terms, source, target) {
+  // Bidirectional is sent only when given, so older callers keep their exact PATCH body.
+  async function updatePreparedSession(name, terms, source, target, options = {}) {
     if (!currentSessionId.value || recordingStatus.value !== 'prepared') throw new Error('只能修改尚未录音的课堂')
+    const mode = bidirectionalOption(options)
+    const changes = { name, source_lang: source, target_lang: target }
+    if (mode !== undefined) changes.bidirectional = mode
     try {
-      await axios.patch(`/api/sessions/${currentSessionId.value}`, {
-        name, source_lang: source, target_lang: target,
-      })
+      await axios.patch(`/api/sessions/${currentSessionId.value}`, changes)
       await axios.put(`/api/sessions/${currentSessionId.value}/glossary`, { terms })
     } catch (error) {
       await loadPreparedSession(currentSessionId.value).catch(() => {})
@@ -91,6 +115,7 @@ export const useSessionStore = defineStore('session', () => {
     glossaryTerms.value = terms
     sourceLang.value = source
     targetLang.value = target
+    if (mode !== undefined) bidirectional.value = mode
   }
 
   async function startRecording(sessionId = currentSessionId.value) {
@@ -142,22 +167,21 @@ export const useSessionStore = defineStore('session', () => {
       resolveConnection()
     }
 
-    const STATUS_PRIORITY = { interim: 0, translating: 1, done: 2, error: 2 }
-
     socket.onmessage = (event) => {
       if (currentSessionId.value !== sessionId) return
       const data = JSON.parse(event.data)
-      // 精修块独立通道：60s 一批 LLM 重译，追加到 polishChunks
+      // 精修块独立通道：每约 60s 一个窗口（要点 + 分说话人 runs），按 id 去重、按窗口顺序排列
       if (data.status === 'polish') {
-        polishChunks.value.push({
-          id: data.id,
-          chunkIndex: data.chunk_index,
-          startSeq: data.start_segment_seq,
-          endSeq: data.end_segment_seq,
-          ko: data.ko_combined,
-          zh: data.zh_polished,
-          createdAt: data.created_at,
-        })
+        polishChunks.value = upsertPolishChunk(polishChunks.value, normalizePolishChunk(data))
+        return
+      }
+      if (data.status === 'speakers') {
+        speakers.value = mergeSpeakerList(speakers.value, data.speakers)
+        return
+      }
+      if (data.status === 'outline') {
+        // An empty refresh keeps the last outline rather than hiding it.
+        outline.value = normalizeOutline(data) ?? outline.value
         return
       }
       if (data.status === 'remove') {
@@ -166,12 +190,10 @@ export const useSessionStore = defineStore('session', () => {
       }
       const idx = segments.value.findIndex(s => s.id === data.id)
       if (idx >= 0) {
-        const curP = STATUS_PRIORITY[segments.value[idx].status] ?? -1
-        const newP = STATUS_PRIORITY[data.status] ?? -1
-        if (newP >= curP) {
-          segments.value[idx] = { ...segments.value[idx], ...data }
-        }
-        // stale interim arriving after translating/done → silently discard
+        // stale interim arriving after translating/done → silently discard;
+        // a null speaker/lang/time never erases a known one
+        const merged = mergeSegmentUpdate(segments.value[idx], data)
+        if (merged) segments.value[idx] = merged
       } else {
         segments.value.push({ ...data, is_starred: false })
       }
@@ -249,6 +271,35 @@ export const useSessionStore = defineStore('session', () => {
     glossaryTerms.value = res.data.terms
   }
 
+  // PUT /api/sessions/{id}/speakers/{index} {name}; empty name resets to 说话人 N.
+  // sessionId defaults to the live session (history pages pass their own).
+  // The live map updates optimistically and is replaced by the server list;
+  // on failure the previous name comes back and the error is rethrown.
+  async function renameSpeaker(index, name, sessionId = currentSessionId.value) {
+    if (!sessionId) throw new Error('请先选择课堂')
+    if (!isSpeakerIndex(index)) throw new Error('说话人编号无效')
+    const cleaned = normalizeSpeakerName(name)
+    if (cleaned && [...cleaned].length > SPEAKER_NAME_MAX) throw new Error(`说话人名称最多 ${SPEAKER_NAME_MAX} 个字`)
+    const isLive = () => sessionId === currentSessionId.value
+    const hadEntry = Object.prototype.hasOwnProperty.call(speakers.value, index)
+    const previous = speakers.value[index]
+    if (isLive()) speakers.value = { ...speakers.value, [index]: { ...previous, index, name: cleaned } }
+    try {
+      const { data } = await axios.put(`/api/sessions/${sessionId}/speakers/${index}`, { name: cleaned })
+      const list = Array.isArray(data?.speakers) ? data.speakers : []
+      if (isLive()) speakers.value = mergeSpeakerList(speakers.value, list, { authoritative: true })
+      return list
+    } catch (error) {
+      if (isLive()) {
+        const restored = { ...speakers.value }
+        if (hadEntry) restored[index] = previous
+        else delete restored[index]
+        speakers.value = restored
+      }
+      throw error
+    }
+  }
+
   async function toggleStar(segmentId) {
     const seg = segments.value.find(s => s.id === segmentId)
     if (!seg) return
@@ -295,6 +346,9 @@ export const useSessionStore = defineStore('session', () => {
     glossaryTerms.value = []
     sourceLang.value = 'ko'
     targetLang.value = 'zh'
+    bidirectional.value = true
+    speakers.value = {}
+    outline.value = null
     recordingStatus.value = 'idle'
     recordingInfo.value = null
     isRecording.value = false
@@ -307,10 +361,11 @@ export const useSessionStore = defineStore('session', () => {
 
   return {
     currentSessionId, sessionName, segments, polishChunks, glossaryTerms, sourceLang, targetLang,
+    bidirectional, speakers, outline,
     recordingStatus, recordingInfo, isRecording, isConnected,
     isFinalizing, finalizeWarning,
     elapsedMs, elapsedFormatted, notes,
     prepareSession, loadPreparedSession, updatePreparedSession, startRecording,
-    stopSession, updateGlossary, toggleStar, saveNotes, resetSession, _sendAudio,
+    stopSession, updateGlossary, renameSpeaker, toggleStar, saveNotes, resetSession, _sendAudio,
   }
 })
