@@ -9,8 +9,10 @@
 """
 import asyncio
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Awaitable, Callable
 
 import numpy as np
 from sqlmodel import Session as DBSession, select
@@ -18,8 +20,11 @@ from sqlmodel import Session as DBSession, select
 from backend.config import settings
 from backend.materials.context import get_relevant_material_context
 from backend.polish.translator import (
-    PolishRun, build_runs, choose_run_text, polish_runs, speaker_label,
-    transcribe_long_form, update_outline,
+    PolishRun, build_runs, choose_run_text, merge_adjacent_runs, polish_runs, speaker_label, speaker_subruns,
+    transcribe_long_form, transcribe_long_form_words, update_outline,
+)
+from backend.speaker.diarize import (
+    Turn, analyze_window, assign_words, diarization_available, dominant_speaker, resolve_turns,
 )
 from backend.storage.database import engine
 from backend.storage.models import GlossaryTerm, PolishedChunk, Segment, Session as SessionModel
@@ -30,6 +35,16 @@ OUTLINE_EVERY = 5
 RUN_PAD_MS = 150
 BYTES_PER_MS = 16 * 4          # 16 kHz float32 mono
 MIN_REASR_MS = 800             # shorter runs gain nothing from re-recognition
+RELABEL_MIN_SHARE = 0.5        # live clips carry ~0.6 s silence each side, so share never reaches 1.0
+
+
+@dataclass
+class SpeakerHooks:
+    """The live connection's speaker state, shared so per-minute diarization keeps its numbering."""
+    tracker: object                               # OnlineSpeakerTracker (not thread-safe: use `lock`)
+    lock: asyncio.Lock
+    embedder: object                              # SpeakerEmbedder
+    on_change: Callable[[], Awaitable[None]] | None = None   # announce/persist new speakers
 
 
 def parse_speaker_names(raw: str | None) -> dict[str, str]:
@@ -59,6 +74,11 @@ class PolishPipeline:
         self._previous_summary = ""
         self._previous_runs: list[dict] = []
         self._lock = asyncio.Lock()   # the tick loop and finalization never overlap
+        self.speakers: SpeakerHooks | None = None
+
+    def attach_speakers(self, hooks: SpeakerHooks) -> None:
+        """Enable per-window diarization; without it runs follow the live sentence labels."""
+        self.speakers = hooks
 
     # ── resume after a pause ───────────────────────────────────────
     def restore(self, recorded_ms: int) -> None:
@@ -195,6 +215,75 @@ class PolishPipeline:
             return
         run.source, run.text_origin = choose_run_text(text, run.realtime_source)
 
+    async def _diarize(self, start_ms: int, end_ms: int) -> list[Turn]:
+        """Speaker turns for the window with session-wide indices; [] when unavailable."""
+        hooks = self.speakers
+        if hooks is None or not await asyncio.to_thread(diarization_available):
+            return []
+        try:
+            audio = await asyncio.to_thread(self._read_audio, start_ms, end_ms)
+            analysis = await asyncio.to_thread(analyze_window, audio, hooks.embedder)
+        except Exception as exc:
+            print(f"[Diarize] window failed ({type(exc).__name__}: {ascii(str(exc))}); using live labels")
+            return []
+        if analysis is None:
+            return []
+        async with hooks.lock:   # the tracker is shared with live sentence labelling
+            before = hooks.tracker.speaker_count
+            turns = resolve_turns(analysis, max(0, start_ms - RUN_PAD_MS), hooks.tracker)
+            grew = hooks.tracker.speaker_count > before
+        if grew and hooks.on_change is not None:
+            await hooks.on_change()
+        return turns
+
+    async def _relabel(self, segments: list[Segment], turns: list[Turn], send_ws: bool) -> None:
+        """Correct live sentence labels with the speaker who talks most in each clip."""
+        changes = []
+        for seg in segments:
+            start = seg.start_ms if seg.start_ms is not None else seg.timestamp_ms
+            end = seg.end_ms if seg.end_ms is not None else start
+            speaker, share = dominant_speaker(start, end, turns)
+            if speaker is not None and share >= RELABEL_MIN_SHARE and speaker != seg.speaker:
+                seg.speaker = speaker
+                changes.append((seg.id, speaker))
+        if not changes:
+            return
+        try:
+            await asyncio.to_thread(self._persist_relabels, changes)
+        except Exception as exc:
+            print(f"[Diarize] could not save {len(changes)} relabels: {type(exc).__name__}: {exc}")
+            return
+        print(f"[Diarize] relabelled {len(changes)}/{len(segments)} live sentences")
+        if send_ws and self.send:
+            await self.send({"status": "relabel", "segments": [
+                {"id": seg_id, "speaker": speaker} for seg_id, speaker in changes
+            ]})
+
+    def _persist_relabels(self, changes: list[tuple[str, int]]) -> None:
+        with DBSession(engine) as db:
+            for seg_id, speaker in changes:
+                row = db.get(Segment, seg_id)
+                if row is not None:
+                    row.speaker = speaker
+            db.commit()
+
+    async def _reasr_split(self, run: PolishRun, segments: list[Segment], turns: list[Turn]) -> list[PolishRun]:
+        """Re-recognise a language run with word timings, then split it at speaker turns."""
+        text, words = "", []
+        if settings.polish_reasr and run.end_ms - run.start_ms >= MIN_REASR_MS:
+            try:
+                audio = await asyncio.to_thread(self._read_audio, run.start_ms, run.end_ms)
+                async with self.gpu_sem:
+                    text, words = await asyncio.to_thread(transcribe_long_form_words, audio, run.lang)
+                offset = max(0, run.start_ms - RUN_PAD_MS)
+                words = [(start + offset, end + offset, word) for start, end, word in words]
+            except Exception as exc:
+                print(f"[Polish] re-ASR failed ({type(exc).__name__}: {exc}); using live text")
+                text, words = "", []
+        _chosen, origin = choose_run_text(text, run.realtime_source)
+        groups = assign_words(words, turns) if origin == "reasr" and words else None
+        return speaker_subruns(run, segments, groups)
+
     def _window_end(self, segments: list[Segment], end_ms: int) -> tuple[int, list[Segment]]:
         """Split a long backlog at a segment start so one call never covers > 90 s."""
         if end_ms - self.cursor_ms <= MAX_WINDOW_MS:
@@ -219,11 +308,21 @@ class PolishPipeline:
             print(f"[Polish] window {start_ms // 1000}-{end_ms // 1000}s: no confirmed speech, skipped")
             return False
 
-        runs = build_runs(segments, self.source_lang, self.target_lang)
+        turns = await self._diarize(start_ms, end_ms)
+        if turns:
+            # One live clip often holds two people's words (09-28: a rapid Korean dialogue
+            # was all "speaker 0"): split by diarized turns, word by word where possible.
+            await self._relabel(segments, turns, send_ws)
+            runs = []
+            for run in build_runs(segments, self.source_lang, self.target_lang, by_speaker=False):
+                runs.extend(await self._reasr_split(run, segments, turns))
+            runs = merge_adjacent_runs(runs)
+        else:
+            runs = build_runs(segments, self.source_lang, self.target_lang)
+            for run in runs:
+                await self._reasr(run)
         if not runs:
             return False
-        for run in runs:
-            await self._reasr(run)
         glossary, names = await asyncio.to_thread(self._load_context)
         try:
             material = await asyncio.to_thread(

@@ -257,3 +257,12 @@ test('bidirectional is sent on create, patched only when given, restored on load
   assert.deepEqual(store.speakers, {})
   assert.equal(store.outline, null)
 })
+
+test('relabel messages correct the speaker of already shown sentences only', async t => {
+  const { store, receive } = await liveSession(t)
+  receive({ id: 'a', status: 'done', ko: '안녕하세요 석진씨', zh: '你好', timestamp_ms: 0, speaker: 0 })
+  receive({ id: 'b', status: 'done', ko: '네 안녕하세요', zh: '嗯你好', timestamp_ms: 3000, speaker: 0 })
+  receive({ status: 'relabel', segments: [{ id: 'b', speaker: 2 }, { id: 'missing', speaker: 1 }] })
+  assert.deepEqual(store.segments.map(s => [s.id, s.speaker]), [['a', 0], ['b', 2]])
+  assert.equal(store.segments[1].zh, '嗯你好', 'relabel keeps text and status')
+})

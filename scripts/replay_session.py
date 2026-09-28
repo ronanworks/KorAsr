@@ -52,6 +52,7 @@ def main():
     parser.add_argument("--target", default="zh")
     parser.add_argument("--no-bidirectional", action="store_true")
     parser.add_argument("--no-reasr", action="store_true")
+    parser.add_argument("--no-diarize", action="store_true", help="skip per-minute speaker diarization")
     parser.add_argument("--llm", action="store_true", help="also call the paid translation/polish API")
     parser.add_argument("--out", type=Path, default=Path("replay_out"))
     args = parser.parse_args()
@@ -64,7 +65,13 @@ def main():
     from backend.asr.transcriber import Transcriber, strip_repeated_boundary, transcribe_audio
     from backend.languages import candidate_languages, translation_target
     from backend.polish.pipeline import MAX_WINDOW_MS, WINDOW_MS
-    from backend.polish.translator import build_runs, choose_run_text, polish_runs, transcribe_long_form
+    from backend.polish.translator import (
+        build_runs, choose_run_text, merge_adjacent_runs, polish_runs, speaker_subruns, transcribe_long_form,
+        transcribe_long_form_words,
+    )
+    from backend.speaker.diarize import (
+        analyze_window, assign_words, diarization_available, dominant_speaker, resolve_turns,
+    )
     from backend.speaker.embedding import get_embedder, speech_duration_s
     from backend.speaker.tracker import OnlineSpeakerTracker
 
@@ -146,13 +153,37 @@ def main():
     t0 = time.perf_counter()
     report_windows = []
     origin = Counter()
+    diarize = not args.no_diarize and embedder is not None and diarization_available()
+    relabelled = 0
     for start, end, segs in windows:
-        runs = build_runs(segs, args.source, args.target)
+        turns = []
+        if diarize and segs:   # same steps as PolishPipeline._diarize/_relabel/_reasr_split
+            offset = max(0, start - 150)
+            analysis = analyze_window(audio[offset * 16: (end + 150) * 16], embedder)
+            turns = resolve_turns(analysis, offset, tracker) if analysis is not None else []
+        if turns:
+            for seg in segs:
+                speaker, share = dominant_speaker(seg.start_ms, seg.end_ms, turns)
+                if speaker is not None and share >= 0.5 and speaker != seg.speaker:
+                    seg.speaker, relabelled = speaker, relabelled + 1
+            runs = []
+            for run in build_runs(segs, args.source, args.target, by_speaker=False):
+                text, words = "", []
+                if not args.no_reasr and run.end_ms - run.start_ms >= 800:
+                    clip_offset = max(0, run.start_ms - 150)
+                    text, words = transcribe_long_form_words(audio[clip_offset * 16: (run.end_ms + 150) * 16], run.lang)
+                    words = [(a + clip_offset, b + clip_offset, w) for a, b, w in words]
+                _chosen, how = choose_run_text(text, run.realtime_source)
+                runs.extend(speaker_subruns(run, segs, assign_words(words, turns) if how == "reasr" and words else None))
+            runs = merge_adjacent_runs(runs)
+        else:
+            runs = build_runs(segs, args.source, args.target)
+            for run in runs:
+                run.source, run.text_origin = run.realtime_source, "realtime"
+                if not args.no_reasr and run.end_ms - run.start_ms >= 800:
+                    clip = audio[max(0, run.start_ms - 150) * 16: (run.end_ms + 150) * 16]
+                    run.source, run.text_origin = choose_run_text(transcribe_long_form(clip, run.lang), run.realtime_source)
         for run in runs:
-            run.source, run.text_origin = run.realtime_source, "realtime"
-            if not args.no_reasr and run.end_ms - run.start_ms >= 800:
-                clip = audio[max(0, run.start_ms - 150) * 16: (run.end_ms + 150) * 16]
-                run.source, run.text_origin = choose_run_text(transcribe_long_form(clip, run.lang), run.realtime_source)
             origin[run.text_origin] += 1
         summary = ""
         if args.llm and runs:
@@ -178,6 +209,7 @@ def main():
         "speaker_speech_s": {str(k): round(v) for k, v in speech_by_speaker.items()},
         "speaker_switches": switches,
         "runs_text_origin": dict(origin),
+        "diarization": {"enabled": bool(diarize), "relabelled_sentences": relabelled},
         "timing_s": {"realtime_path": round(realtime_s, 1), "asr": round(t_asr, 1),
                      "speaker": round(t_spk, 1), "polish_reasr": round(reasr_s, 1)},
     }

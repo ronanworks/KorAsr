@@ -235,6 +235,12 @@ export const useSessionStore = defineStore('session', () => {
       segments.value = segments.value.filter(s => s.id !== data.id)
       return
     }
+    if (data.status === 'relabel') {
+      // Per-minute diarization corrected who said these sentences.
+      const fixes = new Map((data.segments || []).map(item => [item.id, item.speaker]))
+      segments.value = segments.value.map(s => (fixes.has(s.id) ? { ...s, speaker: fixes.get(s.id) } : s))
+      return
+    }
     const idx = segments.value.findIndex(s => s.id === data.id)
     if (idx >= 0) {
       // stale interim arriving after translating/done → silently discard;

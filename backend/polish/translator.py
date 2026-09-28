@@ -23,7 +23,7 @@ from backend.translation.moonshot import get_client, completion_options
 from backend.config import settings
 from backend.asr.model import get_mlx_repo
 from backend.asr.transcriber import looks_degenerate
-from backend.asr.zh_text import clean_zh
+from backend.asr.zh_text import clean_zh, to_simplified
 from backend.languages import ASR_LANGUAGES, LANGUAGE_LABELS
 
 
@@ -144,6 +144,16 @@ def transcribe_long_form(audio: np.ndarray, language: str = "ko") -> str:
     VAD removes pauses inside the run (silence is what made the old 60 s pass
     hallucinate); previous-text conditioning stays configurable, default off.
     """
+    return _long_form(audio, language, with_words=False)[0]
+
+
+def transcribe_long_form_words(audio: np.ndarray, language: str = "ko") -> tuple[str, list[tuple[int, int, str]]]:
+    """transcribe_long_form plus word timings (ms from the start of `audio`), so a run
+    that two people share can be split at the speaker turns found by diarization."""
+    return _long_form(audio, language, with_words=True)
+
+
+def _long_form(audio: np.ndarray, language: str, with_words: bool) -> tuple[str, list[tuple[int, int, str]]]:
     if language not in ASR_LANGUAGES:
         raise ValueError(f"Unsupported ASR language: {language}")
     prompt = _prompt_for(language)
@@ -164,7 +174,7 @@ def transcribe_long_form(audio: np.ndarray, language: str = "ko") -> str:
             if not looks_degenerate(seg.get("text", ""))
         ).strip()
         text = clean_zh(text) if language == "zh" else text
-        return text if is_plausible_polish_transcript(text, language, prompt) else ""
+        return (text, []) if is_plausible_polish_transcript(text, language, prompt) else ("", [])
     from backend.asr.model import get_model
     model = get_model()
     segments, _ = model.transcribe(
@@ -179,10 +189,18 @@ def transcribe_long_form(audio: np.ndarray, language: str = "ko") -> str:
         log_prob_threshold=settings.asr_log_prob_threshold,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 200},
+        word_timestamps=with_words,
     )
-    text = "".join(seg.text for seg in segments if _keep_whisper_segment(seg)).strip()
+    kept = [seg for seg in segments if _keep_whisper_segment(seg)]
+    text = "".join(seg.text for seg in kept).strip()
     text = clean_zh(text) if language == "zh" else text   # Whisper sometimes writes Traditional
-    return text if is_plausible_polish_transcript(text, language, prompt) else ""
+    if not is_plausible_polish_transcript(text, language, prompt):
+        return "", []
+    words = [
+        (int(word.start * 1000), int(word.end * 1000), to_simplified(word.word) if language == "zh" else word.word)
+        for seg in kept for word in (getattr(seg, "words", None) or [])
+    ] if with_words else []
+    return text, words
 
 
 # ── Runs ──────────────────────────────────────────────────────────────
@@ -215,11 +233,13 @@ def _join(parts: Iterable[str]) -> str:
     return " ".join(part.strip() for part in parts if part and part.strip())
 
 
-def build_runs(segments, default_lang: str, default_target: str) -> list[PolishRun]:
+def build_runs(segments, default_lang: str, default_target: str, by_speaker: bool = True) -> list[PolishRun]:
     """Group consecutive segments of the same speaker and language.
 
     `segments` are rows/objects with sequence, start_ms, end_ms, ko_text,
     zh_text, lang, target_lang and speaker (legacy rows may lack the new fields).
+    by_speaker=False groups by language only; speaker_subruns() then splits each
+    run at the diarized turns (one live clip often holds two people's words).
     """
     runs: list[PolishRun] = []
     for seg in sorted(segments, key=lambda s: s.sequence):
@@ -235,7 +255,7 @@ def build_runs(segments, default_lang: str, default_target: str) -> list[PolishR
         end = start if end is None else end
         last = runs[-1] if runs else None
         if (
-            last is not None and last.speaker == speaker and last.lang == lang
+            last is not None and (last.speaker == speaker or not by_speaker) and last.lang == lang
             and start - last.end_ms <= MAX_RUN_GAP_MS and end - last.start_ms <= MAX_RUN_MS
         ):
             last.end_ms = max(last.end_ms, end)
@@ -249,6 +269,106 @@ def build_runs(segments, default_lang: str, default_target: str) -> list[PolishR
             segment_seqs=[seg.sequence],
         ))
     return runs
+
+
+def _segment_span(seg) -> tuple[int, int]:
+    start = getattr(seg, "start_ms", None)
+    start = seg.timestamp_ms if start is None else start
+    end = getattr(seg, "end_ms", None)
+    return start, start if end is None else end
+
+
+MIN_TURN_MS = 1_000
+
+
+def _absorb_blips(word_groups):
+    """Merge sub-second fragments sandwiched between the same speaker into that speaker.
+
+    Turn boundaries are only accurate to ~0.4–0.75 s, so a fast exchange came out as
+    "어렸을 | 때 스무 | 살 때 | 그때 | 남자친구가…" alternating between two people; it is
+    one person's sentence (an echo or a backchannel like "네" gets absorbed, acceptable).
+    """
+    groups = [(speaker, list(words)) for speaker, words in word_groups if words]
+    changed = True
+    while changed and len(groups) >= 3:
+        changed = False
+        for i in range(1, len(groups) - 1):
+            speaker, words = groups[i]
+            before, after = groups[i - 1], groups[i + 1]
+            if (before[0] == after[0] != speaker
+                    and words[-1][1] - words[0][0] < MIN_TURN_MS):
+                groups[i - 1:i + 2] = [(before[0], before[1] + words + after[1])]
+                changed = True
+                break
+    return groups
+
+
+def merge_adjacent_runs(runs: list[PolishRun]) -> list[PolishRun]:
+    """Join neighbouring parts of one speaker in one language (they came from separate
+    re-recognition runs) so the minute card reads as turns, not fragments."""
+    merged: list[PolishRun] = []
+    for run in runs:
+        last = merged[-1] if merged else None
+        if (last is not None and last.speaker == run.speaker and last.lang == run.lang
+                and run.start_ms - last.end_ms <= MAX_RUN_GAP_MS):
+            joiner = "" if run.lang == "zh" else " "
+            last.source = (last.source + joiner + run.source).strip()
+            last.realtime_source = _join([last.realtime_source, run.realtime_source])
+            last.realtime_translation = _join([last.realtime_translation, run.realtime_translation])
+            last.segment_seqs.extend(run.segment_seqs)
+            last.end_ms = max(last.end_ms, run.end_ms)
+            if run.text_origin != last.text_origin:
+                last.text_origin = "mixed"
+            continue
+        merged.append(run)
+    return merged
+
+
+def speaker_subruns(run: PolishRun, segments, word_groups=None) -> list[PolishRun]:
+    """Split a language run into consecutive same-speaker runs.
+
+    word_groups: [(speaker, [(start_ms, end_ms, word), ...]), ...] from
+    diarize.assign_words over the re-recognised words; the text of each part is
+    those words. None: split at sentence level by each (relabelled) segment's
+    speaker, keeping the live text. Either way every live sentence's text and
+    translation land in exactly one part (by midpoint), for fallback and context.
+    """
+    ordered = sorted((seg for seg in segments if seg.sequence in run.segment_seqs), key=lambda seg: seg.sequence)
+    parts: list[PolishRun] = []
+    if word_groups:
+        for speaker, words in _absorb_blips(word_groups):
+            text = "".join(word for _s, _e, word in words).strip()
+            text = clean_zh(text) if run.lang == "zh" else " ".join(text.split())
+            if not text:
+                continue
+            parts.append(PolishRun(
+                speaker=speaker, lang=run.lang, target_lang=run.target_lang,
+                start_ms=words[0][0], end_ms=words[-1][1],
+                realtime_source="", realtime_translation="", source=text, text_origin="reasr",
+            ))
+    if not parts:
+        for seg in ordered:
+            start, end = _segment_span(seg)
+            speaker = getattr(seg, "speaker", None)
+            if parts and parts[-1].speaker == speaker:
+                parts[-1].end_ms = max(parts[-1].end_ms, end)
+                continue
+            parts.append(PolishRun(
+                speaker=speaker, lang=run.lang, target_lang=run.target_lang,
+                start_ms=start, end_ms=end, realtime_source="", realtime_translation="",
+            ))
+    for seg in ordered:
+        start, end = _segment_span(seg)
+        middle = (start + end) / 2
+        part = min(parts, key=lambda p: 0 if p.start_ms <= middle <= p.end_ms
+                   else min(abs(middle - p.start_ms), abs(middle - p.end_ms)))
+        part.realtime_source = _join([part.realtime_source, seg.ko_text or ""])
+        part.realtime_translation = _join([part.realtime_translation, seg.zh_text or ""])
+        part.segment_seqs.append(seg.sequence)
+    for part in parts:
+        if part.text_origin != "reasr":
+            part.source = part.realtime_source
+    return [part for part in parts if part.source]
 
 
 def _compact(text: str) -> str:

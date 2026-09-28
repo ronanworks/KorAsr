@@ -57,6 +57,47 @@ class RunTests(unittest.TestCase):
         self.assertEqual(choose_run_text("전혀 다른 내용이 여기에 들어있습니다 정말로요", live), (live, "realtime"))
 
 
+
+class SpeakerSplitTests(unittest.TestCase):
+    def _run(self):
+        return build_runs([
+            _seg(0, 58000, 64000, "안녕하세요 석진씨 안녕하세요 경은누나", "你好硕珍 你好京恩姐", speaker=0),
+            _seg(1, 63600, 69000, "왜요? 바빴잖아요", "为什么？你很忙吧", speaker=0),
+        ], "ko", "zh", by_speaker=False)[0]
+
+    def test_words_are_split_at_turns_and_blips_absorbed(self):
+        from backend.polish.translator import speaker_subruns
+        run = self._run()
+        groups = [
+            (4, [(58100, 58600, " 안녕하세요"), (58600, 59000, " 석진씨")]),
+            (0, [(59200, 59700, " 안녕하세요"), (59700, 60300, " 경은누나")]),
+            (4, [(60400, 60700, " 네")]),                       # 0.3 s blip inside speaker 0's turn
+            (0, [(60800, 61500, " 앞으로는"), (61500, 62400, " 이야기")]),
+        ]
+        parts = speaker_subruns(run, [
+            _seg(0, 58000, 64000, "안녕하세요 석진씨 안녕하세요 경은누나", "你好硕珍 你好京恩姐", speaker=0),
+            _seg(1, 63600, 69000, "왜요? 바빴잖아요", "为什么？你很忙吧", speaker=0),
+        ], groups)
+        self.assertEqual([(p.speaker, p.source) for p in parts],
+                         [(4, "안녕하세요 석진씨"), (0, "안녕하세요 경은누나 네 앞으로는 이야기")])
+        # every live sentence (and its translation) lands in exactly one part
+        self.assertEqual(sorted(seq for p in parts for seq in p.segment_seqs), [0, 1])
+
+    def test_without_words_split_follows_relabelled_sentences(self):
+        from backend.polish.translator import speaker_subruns
+        segs = [_seg(0, 0, 3000, "첫 문장", "第一句", speaker=0), _seg(1, 3200, 6000, "둘째 문장", "第二句", speaker=2)]
+        run = build_runs(segs, "ko", "zh", by_speaker=False)[0]
+        parts = speaker_subruns(run, segs, None)
+        self.assertEqual([(p.speaker, p.source, p.realtime_translation) for p in parts],
+                         [(0, "첫 문장", "第一句"), (2, "둘째 문장", "第二句")])
+
+    def test_adjacent_parts_of_one_speaker_are_merged(self):
+        from backend.polish.translator import merge_adjacent_runs
+        a, b = _run("근데 옛날에"), _run("똑같은 옷")
+        b.start_ms, b.end_ms = 5500, 9000
+        merged = merge_adjacent_runs([a, b, _run("네", speaker=1)])
+        self.assertEqual([(m.speaker, m.source) for m in merged], [(0, "근데 옛날에 똑같은 옷"), (1, "네")])
+
 class PromptTests(unittest.TestCase):
     def test_prompt_numbers_runs_with_speaker_and_direction(self):
         runs = [_run("오늘은 광합성을 설명합니다."), _run("讲稿在下面", speaker=1, lang="zh", target="ko")]

@@ -16,7 +16,7 @@ from backend.asr.transcriber import Transcriber, strip_repeated_boundary, transc
 from backend.asr.langid import detect_language
 from backend.languages import candidate_languages, translation_target
 from backend.translation.moonshot import sanitize_translation, translate_stream
-from backend.polish.pipeline import PolishPipeline, parse_speaker_names
+from backend.polish.pipeline import PolishPipeline, SpeakerHooks, parse_speaker_names
 from backend.speaker.embedding import get_embedder, speech_duration_s
 from backend.speaker.tracker import OnlineSpeakerTracker
 from backend.storage.database import engine
@@ -448,6 +448,12 @@ async def handle_ws(websocket: WebSocket, session_id: str):
             "speakers": [{"index": i, "name": names.get(str(i))} for i in range(count)],
         })
 
+    async def _speakers_changed() -> None:
+        nonlocal announced_speakers
+        if speaker_tracker.speaker_count > announced_speakers:
+            announced_speakers = speaker_tracker.speaker_count
+            await _announce_speakers(announced_speakers)
+
     async def _assign_speaker(audio: np.ndarray, start_ms: int, end_ms: int) -> int | None:
         nonlocal last_speaker_end_ms, announced_speakers
         if embedder is None:
@@ -661,6 +667,9 @@ async def handle_ws(websocket: WebSocket, session_id: str):
             f"raw PCM -> {ascii(str(raw_pcm_path))}; "
             f"languages={'/'.join(candidates)} speakers={'on' if embedder else 'off'}"
         )
+        if embedder is not None:
+            # Per-minute diarization shares this tracker, so its corrections keep the same numbers.
+            polish.attach_speakers(SpeakerHooks(speaker_tracker, speaker_lock, embedder, _speakers_changed))
         polish_task = asyncio.create_task(_polish_loop())
         if resuming and announced_speakers:
             # The client may have reloaded; tell it the speakers known before the pause.

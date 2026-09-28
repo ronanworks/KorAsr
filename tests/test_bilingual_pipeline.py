@@ -139,6 +139,49 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.session_id, "ko", "zh", self.pcm, asyncio.Semaphore(1), send,
         )
 
+    async def test_diarized_window_relabels_sentences_and_splits_runs_by_word(self):
+        from backend.speaker.diarize import Turn
+
+        class Tracker:
+            speaker_count = 2
+
+        tracker = Tracker()
+        changed = []
+
+        async def on_change():
+            changed.append(tracker.speaker_count)
+
+        def fake_resolve(analysis, offset_ms, trk):
+            self.assertEqual(offset_ms, 0)       # window starts at 0 ms; padding is clipped
+            trk.speaker_count = 4                # diarization found a new person
+            return [Turn(900, 4500, 0), Turn(4500, 8200, 3), Turn(29900, 33200, 1)]
+
+        def fake_words(audio, lang):
+            if lang == "ko":                     # run 1000-8000 ms, read from 850 ms
+                return "원문0 원문1", [(200, 600, " 원문0"), (4200, 4800, " 원문1")]
+            return "원문2", [(100, 2000, "원문2")]
+
+        captured = []
+
+        async def fake_polish(runs, *_args):
+            captured.extend((r.speaker, r.lang, r.source, r.text_origin) for r in runs)
+            for run in runs:
+                run.translation = run.source
+            return PolishResult("ok", "- 要点", runs)
+
+        self.pipeline.attach_speakers(pipeline_module.SpeakerHooks(tracker, asyncio.Lock(), object(), on_change))
+        with patch.object(pipeline_module, "diarization_available", lambda: True),              patch.object(pipeline_module, "analyze_window", lambda audio, embedder: object()),              patch.object(pipeline_module, "resolve_turns", fake_resolve),              patch.object(pipeline_module, "transcribe_long_form_words", fake_words),              patch.object(pipeline_module, "polish_runs", fake_polish),              patch.object(pipeline_module.settings, "polish_reasr", True):
+            self.assertTrue(await self.pipeline.run_due(62_000))
+
+        self.assertEqual(changed, [4])
+        relabel = [m for m in self.sent if m["status"] == "relabel"]
+        self.assertEqual(len(relabel), 1)
+        self.assertEqual([item["speaker"] for item in relabel[0]["segments"]], [3])
+        with DBSession(self.engine) as db:
+            speakers = [row.speaker for row in db.exec(select(Segment).order_by(Segment.sequence)).all()]
+        self.assertEqual(speakers[:3], [0, 3, 1])
+        self.assertEqual(captured, [(0, "ko", "원문0", "reasr"), (3, "ko", "원문1", "reasr"), (1, "zh", "원문2", "reasr")])
+
     async def test_window_waits_for_a_full_minute_then_polishes_and_advances(self):
         calls = []
 

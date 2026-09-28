@@ -28,6 +28,10 @@ from backend.auth import (
 async def lifespan(app: FastAPI):
     print("[Startup] Initializing database...")
     init_db()
+    # Speaker fbank features run on torch: with its default 16 threads one per-minute
+    # diarization window burned ~18 s of CPU; 2 threads cost ~4 s for ~0.2 s more wall time.
+    import torch
+    torch.set_num_threads(2)
     from backend.asr.model import get_model
     get_model()
     # Load the voiceprint model now rather than on the first classroom connection.
@@ -35,6 +39,8 @@ async def lifespan(app: FastAPI):
     get_embedder()
     from backend.asr.sensevoice import get_recognizer
     get_recognizer()
+    from backend.speaker.diarize import diarization_available
+    diarization_available()
     print("[Startup] Ready")
     yield
     print("[Shutdown] Server stopping")

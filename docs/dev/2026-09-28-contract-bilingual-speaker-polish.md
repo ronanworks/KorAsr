@@ -73,6 +73,18 @@ client already knows.
 
 Refreshed every 5 polish windows, at every pause and once at the end of the session.
 
+### Speaker corrections — NEW (2026-09-29)
+
+```json
+{"status": "relabel", "segments": [{"id": "uuid", "speaker": 2}]}
+```
+
+Sent before a `polish` message when per-minute diarization finds that a live sentence
+was mostly spoken by someone else (≥ 50 % of the clip). The client updates `speaker` on
+those sentences only (text/status unchanged); the DB is already updated. Polish `runs`
+of a diarized window are split at speaker turns, word by word when re-recognition is used,
+so one run never mixes two people even when a live clip did.
+
 ## 2a. Client → server control messages, pause / resume (2026-09-28)
 
 Text frames on `/ws/{session_id}`; audio stays binary float32 PCM.

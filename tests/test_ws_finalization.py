@@ -159,6 +159,9 @@ class _Pipeline:
     def restore(self, recorded_ms):
         self.restore_calls.append(recorded_ms)
 
+    def attach_speakers(self, hooks):
+        self.hooks = hooks
+
     async def run_due(self, available_end_ms, send_ws=True):
         self.due_calls.append(available_end_ms)
         return False
@@ -253,6 +256,7 @@ def _load_handler(db, raw_dir):
         ),
         "backend.polish.pipeline": _module(
             "backend.polish.pipeline", PolishPipeline=_Pipeline,
+            SpeakerHooks=lambda *args: types.SimpleNamespace(args=args),
             parse_speaker_names=lambda _raw: {},
         ),
         "backend.speaker.embedding": _module(
