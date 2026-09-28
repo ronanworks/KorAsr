@@ -1,11 +1,13 @@
 # backend/asr/transcriber.py
 import re
 import time
+import zlib
 from difflib import SequenceMatcher
 import numpy as np
 from backend.asr.model import get_model, get_mlx_repo
 from backend.asr.vad import SileroVAD
 from backend.config import settings
+from backend.languages import ASR_LANGUAGES
 
 SAMPLE_RATE = 16000
 OVERLAP_SAMPLES = int(SAMPLE_RATE * 0.4)  # 400ms 重叠窗口，防止切词
@@ -25,7 +27,37 @@ COMMON_HALLUCINATION_PHRASES = {
     "예", "예.",
     "음", "음.",
     "어", "어.",
+    # 中文识别在噪声/笑声上最常吐的短句（09-28 离线回放里 "謝謝大家" 反复出现在非语音块上）
+    "谢谢", "谢谢。", "謝謝", "謝謝。",
+    "谢谢大家", "谢谢大家。", "謝謝大家", "謝謝大家。",
+    "嗯", "嗯。", "好", "好。",
 }
+
+# Whisper's Chinese counterpart of the Korean TV-subtitle hallucinations; only
+# short outputs are dropped, as in the Korean blacklist below.
+ZH_HALLUCINATION_BLACKLIST = (
+    "字幕", "Amara", "点赞", "點贊", "订阅", "訂閱", "打赏", "明镜", "明鏡",
+    "感谢观看", "感謝觀看", "谢谢观看", "謝謝觀看", "谢谢收看", "謝謝收看",
+    "下期再见", "下期再見", "下次见", "下次見", "优优独播", "YoYo",
+    # 09-28 离线测试：给中文加 "以下是普通话的句子。" 提示词后，真实语音被替换成
+    # "请不吝点赞 订阅 转发 打赏支持明镜与点点栏目"，所以 zh 默认不加提示词。
+)
+
+
+def _prompt_for(language: str) -> str:
+    if language == "ko":
+        return settings.asr_initial_prompt
+    if language == "zh":
+        return settings.asr_initial_prompt_zh
+    return ""
+
+
+def _blacklist_for(language: str):
+    if language == "ko":
+        return settings.hallucination_blacklist
+    if language == "zh":
+        return ZH_HALLUCINATION_BLACKLIST
+    return ()
 
 
 def _looks_repetitive(text: str) -> bool:
@@ -51,6 +83,29 @@ def _is_non_speech_transcript(text: str) -> bool:
     if len(compact) >= 8 and content / len(compact) < 0.45:
         return True
     return bool(re.search(r"[,.。，、!?！？…]{5,}", compact))
+
+
+_CHAR_LOOP_RE = re.compile(r"(.)\1{7,}")
+_JAMO_RE = re.compile(r"[ㄱ-ㆎ]")
+
+
+def looks_degenerate(text: str) -> bool:
+    """Loops that the word-level check misses: 'ㅋㅋㅋ…', 'ㄱㄱㄱ…', '한국어로는 ×100'.
+
+    09-28 课堂第 3 个精修窗口的 Whisper 输出是 949 字符的 'ㅋㅋㅋ…'（放视频时的笑声），
+    它通过了旧过滤器，随后让 LLM 每次都生成到超时。
+    """
+    compact = "".join(text.split())
+    if not compact:
+        return False
+    if _CHAR_LOOP_RE.search(compact):
+        return True
+    content = [char for char in compact if char.isalnum()]
+    if len(content) >= 4 and sum(bool(_JAMO_RE.match(char)) for char in content) / len(content) > 0.3:
+        return True
+    encoded = text.encode("utf-8")
+    # Whisper's own loop signal; zlib overhead makes short strings look incompressible.
+    return len(compact) >= 24 and len(encoded) / max(1, len(zlib.compress(encoded))) > 2.4
 
 
 def _is_low_energy_common_hallucination(text: str, rms: float) -> bool:
@@ -148,10 +203,9 @@ def transcribe_audio(
     initial_prompt is prepended to the decoder context so Whisper remembers what was
     said in previous segments (rolling context from the caller).
     """
-    if language not in {"ko", "zh"}:
+    if language not in ASR_LANGUAGES:
         raise ValueError(f"Unsupported ASR language: {language}")
-    default_prompt = settings.asr_initial_prompt if language == "ko" else settings.asr_initial_prompt_zh
-    prompt = initial_prompt.strip() if initial_prompt is not None else default_prompt
+    prompt = initial_prompt.strip() if initial_prompt is not None else _prompt_for(language)
 
     duration = len(audio) / SAMPLE_RATE
     rms = float(np.sqrt(np.mean(audio**2))) if len(audio) else 0.0
@@ -188,6 +242,10 @@ def transcribe_audio(
         print(f"[ASR {mode}] DROPPED (punctuation/noise transcript): {ascii(text[:80])}")
         return ""
 
+    if looks_degenerate(text):
+        print(f"[ASR {mode}] DROPPED (degenerate loop/laughter): {ascii(text[:60])}")
+        return ""
+
     # 3) 低能量 + 常见短语精确匹配：噪声段被吐 '감사합니다.' / '네' 这种
     if _is_low_energy_common_hallucination(text, rms):
         print(f"[ASR {mode}] DROPPED (low-energy hallucination, rms={rms:.4f}): {ascii(text)}")
@@ -195,8 +253,9 @@ def transcribe_audio(
 
     # 4) 长文本黑名单：YouTube/TV 类固定幻觉
     # 长文本可能合法包含这些词，所以只过滤短的。
-    if language == "ko" and any(w in text for w in settings.hallucination_blacklist) and len(text) < 45:
-        hit = [w for w in settings.hallucination_blacklist if w in text]
+    blacklist = _blacklist_for(language)
+    if len(text) < 45 and any(w in text for w in blacklist):
+        hit = [w for w in blacklist if w in text]
         print(f"[ASR {mode}] DROPPED by blacklist {ascii(hit)}: {ascii(text)}")
         return ""
     return text
@@ -204,7 +263,7 @@ def transcribe_audio(
 
 class Transcriber:
     def __init__(self, language: str = "ko"):
-        if language not in {"ko", "zh"}:
+        if language not in ASR_LANGUAGES:
             raise ValueError(f"Unsupported ASR language: {language}")
         self.language = language
         self.vad = SileroVAD(
@@ -214,17 +273,18 @@ class Transcriber:
         )
         self.audio_buffer = np.array([], dtype=np.float32)
         self._has_speech = False
-        self._buffer_start_s: float = 0.0
-        self._buffer_wall_start: float = 0.0
-        self.session_start_ms: float = 0.0
+        # Audio-sample clock since recording start. The buffer always ends at the
+        # newest sample, so its start is total - len(buffer). Unlike wall time it
+        # matches positions in the archived PCM, which polish and playback need.
+        self._total_samples = 0
+        self.last_commit_span: tuple[int, int] = (0, 0)   # sample range of the last commit()
 
     def reset(self, session_start_ms: float = 0.0):
         self.audio_buffer = np.array([], dtype=np.float32)
         self._has_speech = False
-        self._buffer_start_s = 0.0
-        self._buffer_wall_start = time.time()
+        self._total_samples = 0
+        self.last_commit_span = (0, 0)
         self.vad.reset()
-        self.session_start_ms = session_start_ms
 
     @property
     def buffer_seconds(self) -> float:
@@ -235,9 +295,14 @@ class Transcriber:
         return self._has_speech
 
     @property
+    def total_ms(self) -> int:
+        """Audio received so far, in ms."""
+        return self._total_samples * 1000 // SAMPLE_RATE
+
+    @property
     def timestamp_ms(self) -> int:
-        """Milliseconds elapsed from session start to when this buffer began accumulating."""
-        return max(0, int((self._buffer_wall_start - self.session_start_ms / 1000) * 1000))
+        """Audio time (ms since recording start) where the current buffer begins."""
+        return (self._total_samples - len(self.audio_buffer)) * 1000 // SAMPLE_RATE
 
     def push_chunk(self, chunk: np.ndarray) -> dict:
         """
@@ -247,6 +312,7 @@ class Transcriber:
         is_forced/is_end 用于 commit() 决定切点策略（智能切 vs. 简单切）
         """
         self.audio_buffer = np.concatenate((self.audio_buffer, chunk))
+        self._total_samples += len(chunk)
         vad_result = self.vad.process_chunk(chunk)
 
         if vad_result["speech_prob"] >= settings.vad_threshold:
@@ -256,7 +322,6 @@ class Transcriber:
             # silence. Forced 8s cuts must never send silence to Whisper.
             if len(self.audio_buffer) > PRE_SPEECH_SAMPLES:
                 self.audio_buffer = self.audio_buffer[-PRE_SPEECH_SAMPLES:].copy()
-            self._buffer_wall_start = time.time() - len(self.audio_buffer) / SAMPLE_RATE
             return {
                 "should_process": False, "should_interim": False,
                 "speech_prob": vad_result["speech_prob"],
@@ -318,6 +383,7 @@ class Transcriber:
         - was_forced=True （8s 上限强制切）：智能切点 → 送 buffer[:cut]，**未切的尾巴留在 buffer 里**
             这样下一段从用户实际停顿处接着开始，避免词被斩断
         """
+        start_sample = self._total_samples - len(self.audio_buffer)
         if was_forced:
             cut = self._find_best_cut_point()
             audio_out = self.audio_buffer[:cut].copy()
@@ -330,8 +396,7 @@ class Transcriber:
                 self.audio_buffer = self.audio_buffer[-OVERLAP_SAMPLES:].copy()
             else:
                 self.audio_buffer = np.array([], dtype=np.float32)
-        self._buffer_start_s = len(self.audio_buffer) / SAMPLE_RATE
-        self._buffer_wall_start = time.time() - len(self.audio_buffer) / SAMPLE_RATE
+        self.last_commit_span = (start_sample, start_sample + len(audio_out))
         if was_forced:
             # The speaker may still be mid-sentence. Keep both the retained
             # overlap and VAD speech state so the next chunk does not treat

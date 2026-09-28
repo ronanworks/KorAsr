@@ -25,20 +25,38 @@ def build_summary_prompt(source_lang: str, target_lang: str) -> str:
     )
 
 
+def _segment_line(s: Segment, source_lang: str, target_lang: str, speaker_names: dict) -> str:
+    spoken = LANGUAGE_LABELS.get(getattr(s, "lang", None) or source_lang, source_lang)
+    translated = LANGUAGE_LABELS.get(getattr(s, "target_lang", None) or target_lang, target_lang)
+    speaker = getattr(s, "speaker", None)
+    who = ""
+    if speaker is not None:
+        name = speaker_names.get(str(speaker))
+        who = f"说话人{speaker + 1}" + (f"（{name}）" if name else "") + " "
+    return (
+        f"[{s.timestamp_ms // 1000 // 60:02d}:{s.timestamp_ms // 1000 % 60:02d}] {who}"
+        f"{spoken}: {s.ko_text} | {translated}: {s.zh_text or '(translation unavailable)'}"
+    )
+
+
 async def generate_summary(
-    segments: list[Segment], source_lang: str = "ko", target_lang: str = "zh"
+    segments: list[Segment], source_lang: str = "ko", target_lang: str = "zh",
+    minute_summaries: list[str] | None = None, speaker_names: dict | None = None,
 ) -> str:
-    """根据会话的所有片段生成 AI 总结。"""
+    """根据会话的所有片段生成 AI 总结；有每分钟要点时一并作为结构参考。"""
     if not segments:
         return ""
 
-    source, target = LANGUAGE_LABELS[source_lang], LANGUAGE_LABELS[target_lang]
-    transcript_lines = [
-        f"[{s.timestamp_ms // 1000 // 60:02d}:{s.timestamp_ms // 1000 % 60:02d}] "
-        f"{source}: {s.ko_text} | {target}: {s.zh_text or '(translation unavailable)'}"
+    names = speaker_names or {}
+    transcript = "\n".join(
+        _segment_line(s, source_lang, target_lang, names)
         for s in sorted(segments, key=lambda x: x.sequence)
-    ]
-    transcript = "\n".join(transcript_lines)
+    )
+    if minute_summaries:
+        transcript = (
+            "每分钟要点（按时间顺序，供把握结构；以实录为准）：\n"
+            + "\n".join(minute_summaries) + "\n\n课堂实录：\n" + transcript
+        )
 
     client = get_client()
     try:

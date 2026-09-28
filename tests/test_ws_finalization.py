@@ -34,6 +34,7 @@ class _Session:
         self.ended_at = None
         self.duration_seconds = None
         self.segment_count = 0
+        self.bidirectional = False
 
 
 class _User:
@@ -108,10 +109,52 @@ class _Transcriber:
             "is_forced": False,
         }
 
+    @property
+    def total_ms(self):
+        return 1000
+
+    last_commit_span = (1600, 17600)
+
     def commit(self, was_forced=False):
         audio = self.audio_buffer.copy()
         self.audio_buffer = np.array([], dtype=np.float32)
         return audio
+
+
+class _Decision:
+    def __init__(self, language):
+        self.language = language
+        self.share = 1.0
+        self.probs = {}
+
+
+class _Pipeline:
+    """Records how the handler drives the per-minute polish pipeline."""
+    instances = []
+
+    def __init__(self, session_id, source_lang, target_lang, raw_pcm_path, gpu_sem, send=None):
+        self.session_id = session_id
+        self.languages = (source_lang, target_lang)
+        self.send = send
+        self.due_calls = []
+        self.finish_calls = []
+        type(self).instances.append(self)
+
+    async def run_due(self, available_end_ms, send_ws=True):
+        self.due_calls.append(available_end_ms)
+        return False
+
+    async def finish(self, end_ms, send_ws):
+        self.finish_calls.append((end_ms, send_ws))
+
+
+class _Tracker:
+    def __init__(self):
+        self.speaker_count = 0
+
+    def assign(self, embedding, duration_s, gap_s=None):
+        self.speaker_count = 1
+        return types.SimpleNamespace(speaker=0, similarity=1.0, is_new=True)
 
 
 class _WebSocketDisconnect(Exception):
@@ -160,9 +203,6 @@ class _HoldingWebSocket(_WebSocket):
 
 
 def _load_handler(db, raw_dir):
-    async def _no_polish(_text):
-        return ""
-
     stubs = {
         "fastapi": _module("fastapi", WebSocket=_WebSocket, WebSocketDisconnect=_WebSocketDisconnect),
         "sqlmodel": _module("sqlmodel", Session=db, select=lambda *_args: None),
@@ -171,15 +211,22 @@ def _load_handler(db, raw_dir):
             transcribe_audio=lambda *_args, **_kwargs: "한국어",
         ),
         "backend.translation.moonshot": _module("backend.translation.moonshot", translate_stream=None),
-        "backend.polish.translator": _module(
-            "backend.polish.translator", polish_translate=_no_polish,
-            transcribe_long_form=lambda _audio, language="ko": "",
-            is_clearly_silent_audio=lambda _audio: False,
+        "backend.asr.langid": _module(
+            "backend.asr.langid",
+            detect_language=lambda _audio, candidates, previous=None: _Decision(candidates[0]),
         ),
+        "backend.polish.pipeline": _module(
+            "backend.polish.pipeline", PolishPipeline=_Pipeline,
+            parse_speaker_names=lambda _raw: {},
+        ),
+        "backend.speaker.embedding": _module(
+            "backend.speaker.embedding", get_embedder=lambda: None,
+            speech_duration_s=lambda audio: len(audio) / 16000,
+        ),
+        "backend.speaker.tracker": _module("backend.speaker.tracker", OnlineSpeakerTracker=_Tracker),
         "backend.storage.database": _module("backend.storage.database", engine=object()),
         "backend.storage.models": _module(
             "backend.storage.models", Session=_Session, Segment=_Segment,
-            PolishedChunk=type("PolishedChunk", (), {}),
             GlossaryTerm=type("GlossaryTerm", (), {}),
             User=_User,
         ),
@@ -198,6 +245,7 @@ def _load_handler(db, raw_dir):
     # Windows 的测试控制台可能采用 cp1252，业务日志中包含 Unicode 箭头。
     module.print = lambda *_args, **_kwargs: None
     module._translation_hints = lambda *_args: ([], [])
+    module._speaker_names = lambda _session_id: {}
     def claim(session_id, user_id):
         session = db.sessions.get(session_id)
         if not session or session.user_id != user_id or session.recording_state != "created":
@@ -217,6 +265,7 @@ class FinalizationTests(unittest.IsolatedAsyncioTestCase):
         self.db = _Database()
         self.handler = _load_handler(self.db, Path(self.tmp.name))
         self.audio = np.ones(16000, dtype=np.float32).tobytes()
+        _Pipeline.instances.clear()
 
     async def asyncTearDown(self):
         self.tmp.cleanup()
@@ -418,36 +467,96 @@ class FinalizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ws.close_code, 1008)
         self.assertIsNotNone(self.db.session.ended_at)
 
-    async def test_polish_skips_silence_and_advances_to_following_window(self):
-        self.handler.Transcriber.should_process = False
-        self.handler.POLISH_MAX_AUDIO_BYTES = len(self.audio)
-        examined = []
-        longform_calls = []
-
-        def is_silent(audio):
-            mean = float(np.mean(audio))
-            examined.append(mean)
-            return mean < 0.5
-
-        def longform(audio, language="ko"):
-            longform_calls.append(float(np.mean(audio)))
-            return ""  # also consume an ASR window with no plausible text
-
+    async def test_stop_drains_polish_after_all_finals_are_saved(self):
         async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context):
             yield "译文"
 
-        self.handler.is_clearly_silent_audio = is_silent
-        self.handler.transcribe_long_form = longform
         self.handler.translate_stream = translate
         ws = _WebSocket([
-            {"type": "websocket.receive", "bytes": np.zeros(16000, dtype=np.float32).tobytes()},
             {"type": "websocket.receive", "bytes": self.audio},
             {"type": "websocket.receive", "text": '{"action":"stop"}'},
         ])
         await asyncio.wait_for(self.handler.handle_ws(ws, self.db.session.id), 3)
 
-        self.assertEqual(examined, [0.0, 1.0])
-        self.assertEqual(longform_calls, [1.0])
+        pipeline = _Pipeline.instances[-1]
+        self.assertEqual(pipeline.finish_calls, [(1000, True)])
+        segment = next(iter(self.db.segments.values()))
+        self.assertEqual(segment.zh_text, "译文")
+        # Audio-clock span from the transcriber commit (samples -> ms).
+        self.assertEqual((segment.start_ms, segment.end_ms, segment.timestamp_ms), (100, 1100, 100))
+
+    async def test_chinese_speech_in_korean_session_is_translated_into_korean(self):
+        self.db.session.bidirectional = True
+        seen = {}
+
+        def transcribe(_audio, **kwargs):
+            seen["asr_language"] = kwargs["language"]
+            return "你把下面那个文字打出来看一下"
+
+        async def translate(text, previous, glossary, source_lang, target_lang, material_context):
+            seen["translation"] = (source_lang, target_lang)
+            seen["glossary"] = glossary
+            yield "아래 글자를 띄워 보세요"
+
+        self.handler.detect_language = lambda _audio, candidates, previous=None: _Decision("zh")
+        self.handler.transcribe_audio = transcribe
+        self.handler.translate_stream = translate
+        self.handler._translation_hints = lambda *_args: ([], [("스크립트", "讲稿")])
+        ws = _WebSocket([
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.receive", "text": '{"action":"stop"}'},
+        ])
+        await asyncio.wait_for(self.handler.handle_ws(ws, self.db.session.id), 3)
+
+        self.assertEqual(seen["asr_language"], "zh")
+        self.assertEqual(seen["translation"], ("zh", "ko"))
+        self.assertEqual(seen["glossary"], [("讲稿", "스크립트")])   # glossary used in reverse
+        segment = next(iter(self.db.segments.values()))
+        self.assertEqual((segment.lang, segment.target_lang), ("zh", "ko"))
+        done = ws.sent[-1]
+        self.assertEqual((done["status"], done["lang"], done["target_lang"]), ("done", "zh", "ko"))
+
+    async def test_clip_outside_session_languages_is_dropped_without_translation(self):
+        self.db.session.bidirectional = True
+        calls = []
+
+        async def translate(*args):
+            calls.append(args)
+            yield "不应翻译"
+
+        self.handler.detect_language = lambda _audio, candidates, previous=None: _Decision(None)
+        self.handler.translate_stream = translate
+        ws = _WebSocket([
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.receive", "text": '{"action":"stop"}'},
+        ])
+        await asyncio.wait_for(self.handler.handle_ws(ws, self.db.session.id), 3)
+
+        self.assertEqual(self.db.segments, {})
+        self.assertEqual(calls, [])
+        self.assertEqual(ws.sent[-1]["status"], "remove")
+
+    async def test_speaker_label_is_saved_and_announced(self):
+        class Embedder:
+            def embed(self, audio):
+                return np.ones(192, dtype=np.float32)
+
+        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context):
+            yield "译文"
+
+        self.handler.get_embedder = lambda: Embedder()
+        self.handler.translate_stream = translate
+        ws = _WebSocket([
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.receive", "text": '{"action":"stop"}'},
+        ])
+        await asyncio.wait_for(self.handler.handle_ws(ws, self.db.session.id), 3)
+
+        segment = next(iter(self.db.segments.values()))
+        self.assertEqual(segment.speaker, 0)
+        announcements = [m for m in ws.sent if m.get("status") == "speakers"]
+        self.assertEqual(announcements, [{"status": "speakers", "speakers": [{"index": 0, "name": None}]}])
+        self.assertEqual(ws.sent[-1]["speaker"], 0)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 from typing import AsyncIterator, Iterable
 from openai import AsyncOpenAI
 from backend.config import settings
-from backend.languages import LANGUAGE_LABELS, is_valid_pair
+from backend.languages import LANGUAGE_LABELS, is_translation_pair
 
 _client: AsyncOpenAI | None = None
 
@@ -25,7 +25,8 @@ def get_client() -> AsyncOpenAI:
     return _client
 
 def build_system_prompt(source_lang: str, target_lang: str) -> str:
-    if not is_valid_pair(source_lang, target_lang):
+    # Per-segment direction: bidirectional sessions also translate target→source.
+    if not is_translation_pair(source_lang, target_lang):
         raise ValueError("Unsupported translation direction")
     source, target = LANGUAGE_LABELS[source_lang], LANGUAGE_LABELS[target_lang]
     return (
@@ -73,10 +74,20 @@ def build_translation_messages(
     previous = list(previous_pairs)[-2:]
     if previous:
         lines.append("\n前文（只供术语与代词指代参考，不要重复翻译）：")
-        for source, target in previous:
-            lines.append(f"{source_label}：{source[-120:]}")
+        for item in previous:
+            # (spoken, translation) from older callers, or
+            # (spoken_lang, spoken, translated_lang, translation) when a
+            # bidirectional class mixes directions.
+            if len(item) == 4:
+                spoken_lang, source, translated_lang, target = item
+                spoken_label = LANGUAGE_LABELS.get(spoken_lang, source_label)
+                translated_label = LANGUAGE_LABELS.get(translated_lang, target_label)
+            else:
+                source, target = item
+                spoken_label, translated_label = source_label, target_label
+            lines.append(f"{spoken_label}：{source[-120:]}")
             if target:
-                lines.append(f"{target_label}：{target[-120:]}")
+                lines.append(f"{translated_label}：{target[-120:]}")
     lines.append(f"\n当前待译{source_label}（只输出这一句的{target_label}）：\n{text}")
     return [
         {"role": "system", "content": system_prompt},

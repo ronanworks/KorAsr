@@ -23,3 +23,8 @@ whisperServerTransVer copy*.py
 .DS_Store
 Miniconda3-*.sh
 logs/
+
+# Local model weights (speaker embedding ONNX etc.)
+models/
+# Local evaluation outputs (contain classroom transcripts; never commit)
+data/eval/

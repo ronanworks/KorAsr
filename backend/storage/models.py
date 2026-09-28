@@ -19,6 +19,11 @@ class Session(SQLModel, table=True):
     segment_count: int = 0
     summary: Optional[str] = None
     notes: Optional[str] = None
+    # Auto-detect which of the two session languages each utterance is in and
+    # translate the other way when the target language is spoken.
+    bidirectional: bool = Field(default=True)
+    live_outline: Optional[str] = Field(default=None, sa_type=Text)   # running 课堂脉络
+    speaker_names: Optional[str] = Field(default=None, sa_type=Text)  # JSON {"0": "教授"}
     segments: List["Segment"] = Relationship(back_populates="session")
 
 
@@ -51,9 +56,14 @@ class Segment(SQLModel, table=True):
     session_id: str = Field(foreign_key="session.id")
     sequence: int
     timestamp_ms: int
-    ko_text: str
-    zh_text: Optional[str] = None
+    ko_text: str               # spoken text (legacy column name)
+    zh_text: Optional[str] = None   # translation (legacy column name)
     is_starred: bool = False
+    lang: Optional[str] = None          # spoken language of this segment
+    target_lang: Optional[str] = None   # language of zh_text
+    speaker: Optional[int] = None       # 0-based online speaker index
+    start_ms: Optional[int] = None      # audio time since recording start
+    end_ms: Optional[int] = None
     session: Optional[Session] = Relationship(back_populates="segments")
 
 
@@ -71,6 +81,11 @@ class PolishedChunk(SQLModel, table=True):
     ko_combined: str         # source transcript; legacy column name retained for SQLite compatibility
     zh_polished: str         # translated target text; legacy column name retained
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    start_ms: Optional[int] = None      # audio-time window covered by this chunk
+    end_ms: Optional[int] = None
+    summary: Optional[str] = Field(default=None, sa_type=Text)    # 本分钟要点
+    status: str = Field(default="ok")                             # ok | fallback
+    runs_json: Optional[str] = Field(default=None, sa_type=Text)  # per-speaker utterance groups
 
 
 class GlossaryTerm(SQLModel, table=True):

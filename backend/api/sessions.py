@@ -1,5 +1,6 @@
 # backend/api/sessions.py
 from typing import Optional
+import json
 import unicodedata
 from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException
@@ -37,6 +38,7 @@ class SessionCreate(BaseModel):
     glossary_terms: list[GlossaryTermInput] = PydanticField(default_factory=list)
     source_lang: str = "ko"
     target_lang: str = "zh"
+    bidirectional: bool = True
 
 
 class SessionUpdate(BaseModel):
@@ -44,6 +46,15 @@ class SessionUpdate(BaseModel):
     notes: Optional[str] = None
     source_lang: Optional[str] = None
     target_lang: Optional[str] = None
+    bidirectional: Optional[bool] = None
+
+
+class SpeakerRename(BaseModel):
+    name: Optional[str] = None
+
+
+MAX_SPEAKER_INDEX = 15
+MAX_SPEAKER_NAME_CHARS = 24
 
 
 class SegmentPatch(BaseModel):
@@ -104,6 +115,7 @@ def create_session(body: SessionCreate, db: DBSession = Depends(get_db), user: U
     sess = SessionModel(
         name=body.name, user_id=user.id,
         source_lang=body.source_lang, target_lang=body.target_lang,
+        bidirectional=body.bidirectional,
     )
     try:
         db.add(sess)
@@ -144,7 +156,81 @@ def get_session(session_id: str, db: DBSession = Depends(get_db), user: User = D
         .where(PolishedChunk.session_id == session_id)
         .order_by(PolishedChunk.chunk_index, PolishedChunk.created_at, PolishedChunk.id)
     ).all()
-    return {"session": sess, "segments": segments, "polished_chunks": polished_chunks}
+    return {
+        "session": sess,
+        "segments": segments,
+        "polished_chunks": [_chunk_response(chunk) for chunk in polished_chunks],
+        "speakers": _speakers_response(sess, segments),
+    }
+
+
+def _chunk_range(chunk: PolishedChunk) -> str:
+    if chunk.start_ms is None or chunk.end_ms is None:
+        return f"#{chunk.chunk_index + 1}"
+    fmt = lambda ms: f"{ms // 60000:02d}:{ms // 1000 % 60:02d}"
+    return f"{fmt(chunk.start_ms)}–{fmt(chunk.end_ms)}"
+
+
+def _chunk_response(chunk: PolishedChunk) -> dict:
+    data = chunk.model_dump()
+    try:
+        runs = json.loads(chunk.runs_json) if chunk.runs_json else []
+    except ValueError:
+        runs = []
+    data.pop("runs_json", None)
+    data["runs"] = runs if isinstance(runs, list) else []
+    return data
+
+
+def _speaker_names(sess: SessionModel) -> dict[str, str]:
+    try:
+        names = json.loads(sess.speaker_names) if sess.speaker_names else {}
+    except ValueError:
+        return {}
+    return {str(k): str(v) for k, v in names.items() if v} if isinstance(names, dict) else {}
+
+
+def _speakers_response(sess: SessionModel, segments) -> list[dict]:
+    counts: dict[int, int] = {}
+    for seg in segments:
+        if seg.speaker is not None:
+            counts[seg.speaker] = counts.get(seg.speaker, 0) + 1
+    names = _speaker_names(sess)
+    indices = sorted(set(counts) | {int(k) for k in names if k.isdigit()})
+    return [
+        {"index": index, "name": names.get(str(index)), "segment_count": counts.get(index, 0)}
+        for index in indices
+    ]
+
+
+@router.put("/{session_id}/speakers/{index}")
+def rename_speaker(
+    session_id: str, index: int, body: SpeakerRename,
+    db: DBSession = Depends(get_db), user: User = Depends(current_user),
+):
+    """Name a detected speaker (教授 / 我 …); allowed during and after recording."""
+    sess = owned_session(db, session_id, user)
+    if not 0 <= index <= MAX_SPEAKER_INDEX:
+        raise HTTPException(422, "Speaker index out of range")
+    name = " ".join((body.name or "").split())
+    if any(unicodedata.category(char).startswith("C") for char in name):
+        raise HTTPException(422, "Speaker name cannot contain control characters")
+    if len(name) > MAX_SPEAKER_NAME_CHARS:
+        raise HTTPException(422, f"Speaker name is limited to {MAX_SPEAKER_NAME_CHARS} characters")
+    names = _speaker_names(sess)
+    if name:
+        names[str(index)] = name
+    else:
+        names.pop(str(index), None)
+    sess.speaker_names = json.dumps(names, ensure_ascii=False) if names else None
+    db.commit()
+    db.refresh(sess)
+    segments = db.exec(select(Segment).where(Segment.session_id == session_id)).all()
+    speakers = _speakers_response(sess, segments)
+    if not any(item["index"] == index for item in speakers):
+        speakers.append({"index": index, "name": name or None, "segment_count": 0})
+        speakers.sort(key=lambda item: item["index"])
+    return {"speakers": speakers}
 
 
 @router.get("/{session_id}/glossary")
@@ -189,8 +275,12 @@ def update_session(
         changes["name"] = body.name
     if body.notes is not None:
         changes["notes"] = body.notes
-    changing_direction = body.source_lang is not None or body.target_lang is not None
-    if changing_direction:
+    changing_direction = (
+        body.source_lang is not None or body.target_lang is not None or body.bidirectional is not None
+    )
+    if body.bidirectional is not None:
+        changes["bidirectional"] = body.bidirectional
+    if body.source_lang is not None or body.target_lang is not None:
         source_lang = body.source_lang if body.source_lang is not None else sess.source_lang
         target_lang = body.target_lang if body.target_lang is not None else sess.target_lang
         if not is_valid_pair(source_lang, target_lang):
@@ -318,7 +408,17 @@ async def trigger_summary(
     segments = db.exec(
         select(Segment).where(Segment.session_id == session_id).order_by(Segment.sequence)
     ).all()
-    summary = await generate_summary(list(segments), sess.source_lang, sess.target_lang)
+    chunks = db.exec(
+        select(PolishedChunk).where(PolishedChunk.session_id == session_id)
+        .order_by(PolishedChunk.chunk_index)
+    ).all()
+    minute_summaries = [
+        f"[{_chunk_range(chunk)}] {chunk.summary}" for chunk in chunks if chunk.summary
+    ]
+    summary = await generate_summary(
+        list(segments), sess.source_lang, sess.target_lang,
+        minute_summaries=minute_summaries, speaker_names=_speaker_names(sess),
+    )
     sess.summary = summary
     db.commit()
     return {"summary": summary}

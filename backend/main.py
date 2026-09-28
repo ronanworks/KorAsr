@@ -30,6 +30,9 @@ async def lifespan(app: FastAPI):
     init_db()
     from backend.asr.model import get_model
     get_model()
+    # Load the voiceprint model now rather than on the first classroom connection.
+    from backend.speaker.embedding import get_embedder
+    get_embedder()
     print("[Startup] Ready")
     yield
     print("[Shutdown] Server stopping")

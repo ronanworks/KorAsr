@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     asr_log_prob_threshold: float = -1.0           # discard very low-confidence segments
     asr_repetition_penalty: float = 1.1            # penalise repeated tokens at decoder level
     polish_condition_on_previous_text: bool = False  # avoid long-form Whisper repetition loops
+    polish_reasr: bool = True   # re-recognise each speaker run with more context before the minute polish
 
     vad_threshold: float = 0.5
     vad_min_silence_ms: int = 600                  # down from 1000 — faster sentence boundary detection
@@ -63,6 +64,19 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/korasr.db"
     raw_audio_dir: str = "data/raw"
     extra_cert_sans: str = ""
+
+    # --- speaker diarization ---
+    # CAM++ 声纹 + 在线聚类，CPU 推理；模型缺失或加载失败时自动关闭，不影响转写。
+    # 相对路径按项目根解析（不是 CWD）。阈值由 scripts/eval_speaker.py 在标注集 + 87 分钟课堂录音上选出，
+    # 依据写在 backend/speaker/tracker.py 默认值旁；改这里时同步那边的 DEFAULT_*。
+    speaker_enabled: bool = True
+    speaker_model_path: str = "models/speaker/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
+    speaker_threads: int = 2
+    speaker_assign_threshold: float = 0.5   # 余弦 ≥ 此值归入最像的说话人
+    speaker_new_threshold: float = 0.4      # 与所有人都 < 此值且够长才新建说话人
+    speaker_min_new_s: float = 2.0          # 新建说话人所需的语音秒数（去掉首尾静音后）
+    speaker_max_speakers: int = 8
+    # --- end speaker diarization ---
 
     # extra="ignore" so env keys consumed elsewhere (RAW_AUDIO_DIR / HF_HOME /
     # EXTRA_CERT_SANS — read via os.environ in handler/start) don't trip pydantic.

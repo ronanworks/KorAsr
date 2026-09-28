@@ -77,7 +77,9 @@ class SessionHistoryTests(unittest.TestCase):
     def test_detail_and_exports_include_polished_chunks_in_order(self):
         detail = sessions_api.get_session(self.session.id, self.db, self.user)
         self.assertEqual([s.sequence for s in detail["segments"]], [1, 2])
-        self.assertEqual([c.chunk_index for c in detail["polished_chunks"]], [0, 1])
+        self.assertEqual([c["chunk_index"] for c in detail["polished_chunks"]], [0, 1])
+        self.assertEqual(detail["polished_chunks"][0]["runs"], [])
+        self.assertNotIn("runs_json", detail["polished_chunks"][0])
 
         for format in ("txt", "md"):
             with self.subTest(format=format):

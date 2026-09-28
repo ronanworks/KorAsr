@@ -1,4 +1,5 @@
 # backend/api/export.py
+import json
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,6 +12,46 @@ from backend.auth import current_user
 from backend.languages import LANGUAGE_LABELS
 
 router = APIRouter(prefix="/api/sessions", tags=["export"])
+
+
+def _names(sess) -> dict[str, str]:
+    try:
+        names = json.loads(sess.speaker_names) if getattr(sess, "speaker_names", None) else {}
+    except ValueError:
+        return {}
+    return names if isinstance(names, dict) else {}
+
+
+def _speaker(index, names) -> str:
+    if index is None:
+        return ""
+    name = names.get(str(index))
+    return f"说话人{index + 1}" + (f"（{name}）" if name else "")
+
+
+def _lang_tag(seg, sess) -> str:
+    """Only mark sentences whose direction differs from the session default."""
+    lang = getattr(seg, "lang", None)
+    if not lang or lang == sess.source_lang:
+        return ""
+    target = getattr(seg, "target_lang", None) or sess.source_lang
+    return f"[{LANGUAGE_LABELS.get(lang, lang)}→{LANGUAGE_LABELS.get(target, target)}] "
+
+
+def _runs(chunk) -> list[dict]:
+    try:
+        runs = json.loads(chunk.runs_json) if getattr(chunk, "runs_json", None) else []
+    except ValueError:
+        return []
+    return runs if isinstance(runs, list) else []
+
+
+def _range(chunk) -> str:
+    start, end = getattr(chunk, "start_ms", None), getattr(chunk, "end_ms", None)
+    if start is None or end is None:
+        return f"Part {chunk.chunk_index + 1}"
+    fmt = lambda ms: f"{ms // 60000:02d}:{ms // 1000 % 60:02d}"
+    return f"{fmt(start)}–{fmt(end)}"
 
 
 def _content_disposition(filename: str) -> str:
@@ -33,6 +74,9 @@ def export_session(
     source_label = LANGUAGE_LABELS.get(sess.source_lang, sess.source_lang)
     target_label = LANGUAGE_LABELS.get(sess.target_lang, sess.target_lang)
     direction = f"{source_label} → {target_label}"
+    if getattr(sess, "bidirectional", False):
+        direction += f"（自动识别双语：{target_label}发言译成{source_label}）"
+    names = _names(sess)
     segments = db.exec(
         select(Segment)
         .where(Segment.session_id == session_id)
@@ -49,18 +93,24 @@ def export_session(
         for seg in segments:
             mm = seg.timestamp_ms // 1000 // 60
             ss = seg.timestamp_ms // 1000 % 60
-            lines.append(f"[{mm:02d}:{ss:02d}] {seg.ko_text} | {seg.zh_text or ''}")
+            who = _speaker(getattr(seg, "speaker", None), names)
+            who = f"{who}: " if who else ""
+            lines.append(f"[{mm:02d}:{ss:02d}] {who}{_lang_tag(seg, sess)}{seg.ko_text} | {seg.zh_text or ''}")
+        if getattr(sess, "live_outline", None):
+            lines += ["", "=== Outline ===", sess.live_outline]
         if polished_chunks:
             lines += ["", "=== Polished Translation ==="]
             for chunk in polished_chunks:
-                lines += [
-                    "",
-                    f"[Part {chunk.chunk_index + 1}]",
-                    f"{source_label}:",
-                    chunk.ko_combined,
-                    f"{target_label}:",
-                    chunk.zh_polished,
-                ]
+                lines += ["", f"[{_range(chunk)}]"]
+                if getattr(chunk, "summary", None):
+                    lines += [chunk.summary]
+                runs = _runs(chunk)
+                if runs:
+                    for run in runs:
+                        who = _speaker(run.get("speaker"), names) or "?"
+                        lines += [f"{who}: {run.get('source', '')}", f"  → {run.get('translation', '')}"]
+                else:
+                    lines += [f"{source_label}:", chunk.ko_combined, f"{target_label}:", chunk.zh_polished]
         if sess.notes:
             lines += ["", "=== My Notes ===", sess.notes]
         content = "\n".join(lines)
@@ -86,23 +136,35 @@ def export_session(
             mm = seg.timestamp_ms // 1000 // 60
             ss = seg.timestamp_ms // 1000 % 60
             star = "⭐ " if seg.is_starred else ""
-            lines.append(f"| {mm:02d}:{ss:02d} | {star}{seg.ko_text} | {seg.zh_text or ''} |")
+            who = _speaker(getattr(seg, "speaker", None), names)
+            who = f"**{who}** " if who else ""
+            lines.append(f"| {mm:02d}:{ss:02d} | {star}{who}{_lang_tag(seg, sess)}{seg.ko_text} | {seg.zh_text or ''} |")
 
+        if getattr(sess, "live_outline", None):
+            lines += ["", "## Outline", "", sess.live_outline]
         if polished_chunks:
             lines += ["", "## Polished Translation"]
             for chunk in polished_chunks:
-                lines += [
-                    "",
-                    f"### Part {chunk.chunk_index + 1}",
-                    "",
-                    f"**{source_label}**",
-                    "",
-                    chunk.ko_combined,
-                    "",
-                    f"**{target_label}**",
-                    "",
-                    chunk.zh_polished,
-                ]
+                lines += ["", f"### {_range(chunk)}"]
+                if getattr(chunk, "summary", None):
+                    lines += ["", chunk.summary]
+                runs = _runs(chunk)
+                if runs:
+                    lines += [""]
+                    for run in runs:
+                        who = _speaker(run.get("speaker"), names) or "?"
+                        lines += [f"- **{who}**：{run.get('translation', '')}", f"  <br><sub>{run.get('source', '')}</sub>"]
+                else:
+                    lines += [
+                        "",
+                        f"**{source_label}**",
+                        "",
+                        chunk.ko_combined,
+                        "",
+                        f"**{target_label}**",
+                        "",
+                        chunk.zh_polished,
+                    ]
 
         if sess.summary:
             lines += ["", "## AI Summary", "", sess.summary]

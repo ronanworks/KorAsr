@@ -1,6 +1,8 @@
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
-faster-whisper>=1.0.0
+faster-whisper>=1.1.0
+# Speaker voiceprints (CAM++ ONNX); faster-whisper already pulls it in for its VAD
+onnxruntime>=1.14.0
 # Apple Silicon Mac 专用：MLX 后端，走 M-series GPU (Metal)，比 CPU faster-whisper 快 3-5×
 mlx-whisper>=0.4.0; platform_machine == 'arm64' and sys_platform == 'darwin'
 torch>=2.2.0

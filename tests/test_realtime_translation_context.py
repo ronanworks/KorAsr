@@ -23,7 +23,7 @@ class RealtimeTranslationContextTests(unittest.TestCase):
                 self.assertIn(LANGUAGE_LABELS[target_lang], messages[0]["content"])
                 self.assertIn(f"当前待译{LANGUAGE_LABELS[source_lang]}", messages[1]["content"])
         with self.assertRaises(ValueError):
-            build_translation_messages("invalid", source_lang="ru", target_lang="zh")
+            build_translation_messages("invalid", source_lang="ja", target_lang="zh")
 
     def test_prior_text_and_matching_glossary_are_separate_from_current_sentence(self):
         messages = build_translation_messages(

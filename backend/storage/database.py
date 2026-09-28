@@ -24,6 +24,14 @@ if engine.dialect.name == "sqlite":
         cursor.close()
 
 
+def _add_missing_columns(connection, table: str, wanted: dict[str, str]) -> None:
+    """Additive SQLite migration: never rewrites or drops existing data."""
+    existing = {row[1] for row in connection.execute(text(f"PRAGMA table_info({table})"))}
+    for name, ddl in wanted.items():
+        if name not in existing:
+            connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+
+
 def init_db(db_engine=None):
     """Add identity/language columns to old SQLite files without replacing data."""
     db_engine = db_engine or engine
@@ -58,6 +66,20 @@ def init_db(db_engine=None):
                     connection.execute(text(
                         "UPDATE session SET recording_state = 'recording' WHERE id = :id"
                     ), {"id": session_id})
+        if "bidirectional" not in columns:
+            # Old sessions were recorded single-direction; keep them that way.
+            connection.execute(text("ALTER TABLE session ADD COLUMN bidirectional BOOLEAN NOT NULL DEFAULT 0"))
+        for name in ("live_outline", "speaker_names"):
+            if name not in columns:
+                connection.execute(text(f"ALTER TABLE session ADD COLUMN {name} TEXT"))
+        _add_missing_columns(connection, "segment", {
+            "lang": "VARCHAR", "target_lang": "VARCHAR", "speaker": "INTEGER",
+            "start_ms": "INTEGER", "end_ms": "INTEGER",
+        })
+        _add_missing_columns(connection, "polishedchunk", {
+            "start_ms": "INTEGER", "end_ms": "INTEGER", "summary": "TEXT",
+            "status": "VARCHAR NOT NULL DEFAULT 'ok'", "runs_json": "TEXT",
+        })
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_session_user_id ON session (user_id)"))
         # Interrupted bootstrap can leave unowned legacy rows. Bind them to
         # the first administrator only; never expose them to regular accounts.
