@@ -14,11 +14,19 @@
         :recording-status="store.recordingStatus"
         :recording-info="store.recordingInfo"
         :session-id="store.currentSessionId"
+        :pause-reason="store.pauseReason"
+        :reconnect-attempt="store.reconnectAttempt"
+        :reconnect-total="RECONNECT_DELAYS_MS.length"
+        :busy="resuming"
+        @pause="onPause"
+        @resume="resumeClass"
         @stop="onStop"
         @summary="onSummary"
         @rename="onRename"
         @glossary="onGlossary"
       />
+      <div v-if="pauseNotice" class="pause-notice" role="status">{{ pauseNotice }}</div>
+      <div v-if="actionError" class="mic-error" role="alert">{{ actionError }}</div>
       <div v-if="micError" class="mic-error" role="alert">{{ micError }}</div>
       <div v-if="speakerError" class="mic-error" role="alert">{{ speakerError }}</div>
       <details v-if="micProcessingStatus" class="mic-diagnostics">
@@ -140,6 +148,12 @@
             <p v-if="!isPrepared" class="helper">请先完成第 1 步。</p>
             <p v-else class="helper">开始前会保存当前设置并请求麦克风权限。</p>
           </section>
+          <section v-if="pausedClasses.length" class="surface drafts-card">
+            <h2>继续已暂停的课堂</h2>
+            <button v-for="item in pausedClasses" :key="item.id" class="draft-choice" :disabled="starting || preparing || resuming" @click="continuePausedClass(item.id)">
+              <strong>{{ item.name }}</strong><span>已录 {{ formatAudioTime((item.duration_seconds || 0) * 1000) }} · {{ sessionDirectionLabel(item.source_lang, item.target_lang, item.bidirectional) }}</span>
+            </button>
+          </section>
           <section v-if="drafts.length" class="surface drafts-card">
             <h2>继续未开录的课堂</h2>
             <button v-for="draft in drafts" :key="draft.id" class="draft-choice" :class="{ active: draft.id === store.currentSessionId }" :disabled="starting || preparing" @click="selectDraft(draft.id)">
@@ -168,13 +182,14 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import axios from 'axios'
-import { useSessionStore } from '../stores/session.js'
+import { RECONNECT_DELAYS_MS, useSessionStore } from '../stores/session.js'
 import StatusBar from '../components/StatusBar.vue'
 import TranscriptFeed from '../components/TranscriptFeed.vue'
 import PolishFeed from '../components/PolishFeed.vue'
 import NotesPad from '../components/NotesPad.vue'
 import MaterialsPanel from '../components/MaterialsPanel.vue'
 import { languageLabel, sessionDirectionLabel, TARGETS_BY_SOURCE } from '../utils/languages.js'
+import { formatAudioTime } from '../utils/polish.js'
 
 const store = useSessionStore()
 let micStream = null
@@ -229,15 +244,23 @@ onUnmounted(() => {
   viewUnmounted = true
   startAttempt += 1
   clearTimeout(speakerErrorTimeout)
-  if (store.isRecording) store.stopSession()
+  store.setReconnectHandler(null)
+  // Only 结束 ends a class; leaving the page pauses it.
+  if (store.isRecording) store.pauseSession('user')
   stopMicrophone()
 })
 const isMobile = ref(window.innerWidth < 768)
 function onResize() { isMobile.value = window.innerWidth < 768 }
 onMounted(() => {
   window.addEventListener('resize', onResize)
+  store.setReconnectHandler(reacquireMicrophone)
   if (isPrepared.value) syncDraftForm()
   refreshDrafts()
+  if (store.resumeOnOpen) {
+    // 课堂记录 → 继续上课: the paused class is loaded; start recording again.
+    store.resumeOnOpen = false
+    resumeClass()
+  }
 })
 onUnmounted(() => window.removeEventListener('resize', onResize))
 
@@ -265,16 +288,35 @@ watch(newSourceLang, () => {
   if (!targetOptions.value.includes(newTargetLang.value)) newTargetLang.value = targetOptions.value[0]
 })
 const drafts = ref([])
+const pausedClasses = ref([])
 const materialsCount = ref(0)
 const preparing = ref(false)
 const starting = ref(false)
+const resuming = ref(false)
 let startAttempt = 0
 const prepError = ref('')
 const prepMessage = ref('')
+const actionError = ref('')
 const isPrepared = computed(() => Boolean(store.currentSessionId) && store.recordingStatus === 'prepared')
+// A paused class stays on screen with everything shown so far.
+const LIVE_VIEW_STATUSES = ['connecting', 'saving', 'pausing', 'paused', 'reconnecting', 'resuming']
 const showLive = computed(() =>
-  store.isRecording || store.isFinalizing || ['connecting', 'saving'].includes(store.recordingStatus),
+  store.isRecording || store.isFinalizing || LIVE_VIEW_STATUSES.includes(store.recordingStatus),
 )
+const pauseNotice = computed(() => {
+  switch (store.recordingStatus) {
+    case 'pausing':
+      return store.finalizeWarning ? '暂停前的整理时间较长，内容会保存到课堂记录。' : '正在暂停：保存最后一句和这一分钟的精修…'
+    case 'reconnecting':
+      return '连接中断，正在自动重连。已显示的内容都在，录音会接着保存。'
+    case 'paused':
+      if (store.pauseReason === 'connection') return '连接中断，已暂停，可点继续恢复。'
+      if (store.pauseReason === 'microphone') return '麦克风不可用，课堂已暂停。检查设备后可点继续。'
+      return '课堂已暂停。字幕、精修和录音都已保存，点“继续”接着录同一节课。'
+    default:
+      return ''
+  }
+})
 const showComplete = computed(() =>
   Boolean(store.currentSessionId) && ['saved', 'unavailable', 'unknown'].includes(store.recordingStatus),
 )
@@ -315,9 +357,25 @@ async function refreshDrafts() {
   try {
     const { data } = await axios.get('/api/sessions')
     drafts.value = data.filter(session => session.recording_state === 'created')
+    pausedClasses.value = data.filter(session => session.recording_state === 'paused')
   } catch (_) {
     drafts.value = []
+    pausedClasses.value = []
   }
+}
+async function continuePausedClass(id) {
+  if (starting.value || preparing.value || resuming.value) return
+  if (isPrepared.value && !confirm('切换到已暂停的课堂？当前未保存的修改会丢失，已保存的课堂和材料会保留。')) return
+  prepError.value = ''
+  prepMessage.value = ''
+  try {
+    await store.loadPausedSession(id)
+  } catch (error) {
+    prepError.value = error.response?.data?.detail || error.message
+    return
+  }
+  auxiliaryPanel.value = null
+  await resumeClass()
 }
 async function selectDraft(id) {
   if (id === store.currentSessionId) return
@@ -371,6 +429,7 @@ function newClass() {
   newGlossaryText.value = ''
   micError.value = ''
   speakerError.value = ''
+  actionError.value = ''
   micProcessingStatus.value = null
   prepError.value = ''
   prepMessage.value = ''
@@ -412,7 +471,7 @@ async function beginRecording() {
     await store.startRecording(store.currentSessionId)
     connected = true
     if (attempt !== startAttempt || viewUnmounted) {
-      store.stopSession()
+      store.pauseSession('user')
       stopMicrophone()
       return
     }
@@ -421,12 +480,64 @@ async function beginRecording() {
   } catch (error) {
     stopMicrophone()
     micProcessingStatus.value = null
-    if (connected || store.isRecording) store.stopSession()
+    // Keep a started class resumable; only 结束 ends it.
+    if (connected || store.isRecording) store.pauseSession('microphone')
     if (attempt === startAttempt && !viewUnmounted) {
       prepError.value = error.response?.data?.detail || error.message
       micError.value = error.message
     }
   } finally { starting.value = false }
+}
+
+// 继续: a new connection to the same class; everything on screen stays.
+async function resumeClass() {
+  if (resuming.value || !['paused', 'reconnecting'].includes(store.recordingStatus)) return
+  // A manual 继续 replaces any automatic reconnect still waiting.
+  if (store.recordingStatus === 'reconnecting') store.pauseSession('connection')
+  const attempt = ++startAttempt
+  let connected = false
+  resuming.value = true
+  micError.value = ''
+  actionError.value = ''
+  try {
+    // Ask for the microphone while the click still counts as a user gesture.
+    await prepareMicrophone(browserProcessingEnabled.value)
+    if (attempt !== startAttempt || viewUnmounted) { stopMicrophone(); return }
+    await store.resumeRecording()
+    connected = true
+    if (attempt !== startAttempt || viewUnmounted) {
+      store.pauseSession('user')
+      stopMicrophone()
+      return
+    }
+    await attachMicrophone()
+  } catch (error) {
+    stopMicrophone()
+    micProcessingStatus.value = null
+    if (connected || store.isRecording) store.pauseSession('microphone')
+    if (attempt === startAttempt && !viewUnmounted) micError.value = `无法继续录音：${error.message}`
+  } finally { resuming.value = false }
+}
+
+// Called by the store after an automatic reconnect: the socket is open again.
+async function reacquireMicrophone() {
+  if (viewUnmounted) throw new Error('页面已关闭')
+  stopMicrophone()
+  try {
+    await prepareMicrophone(browserProcessingEnabled.value)
+    await attachMicrophone()
+    micError.value = ''
+  } catch (error) {
+    stopMicrophone()
+    micProcessingStatus.value = null
+    if (!viewUnmounted) micError.value = `已重新连接，但麦克风无法启动：${error.message}`
+    throw error
+  }
+}
+
+function onPause() {
+  actionError.value = ''
+  store.pauseSession('user')
 }
 
 async function onGlossary() {
@@ -538,8 +649,8 @@ function startAudioWatchdog() {
         console.error('Microphone fallback failed', error)
       }
     }
-    micError.value = '麦克风已授权，但浏览器未产生音频块。请检查系统输入设备，或换 Chrome/Edge 后重试。'
-    store.stopSession()
+    micError.value = '麦克风已授权，但浏览器未产生音频块。课堂已暂停；请检查系统输入设备，或换 Chrome/Edge 后点继续。'
+    store.pauseSession('microphone')
   }, 3500)
 }
 
@@ -552,8 +663,8 @@ async function attachMicrophone() {
   const track = micStream.getAudioTracks()[0]
   track.onended = () => {
     if (!store.isRecording) return
-    micError.value = '麦克风音频轨道已停止，课堂录音已结束。'
-    store.stopSession()
+    micError.value = '麦克风音频轨道已停止，课堂已暂停。检查设备后可点继续。'
+    store.pauseSession('microphone')
   }
   if (audioContext.audioWorklet?.addModule) {
     try {
@@ -578,7 +689,23 @@ async function attachMicrophone() {
   })
 }
 
-function onStop() { store.stopSession() }
+// 结束: over the socket while recording (saves the last sentence); REST while paused.
+async function onStop() {
+  actionError.value = ''
+  if (store.isRecording) {
+    store.stopSession()
+    return
+  }
+  if (!['paused', 'reconnecting'].includes(store.recordingStatus)) return
+  try {
+    await store.endPausedSession()
+  } catch (error) {
+    if (viewUnmounted) return
+    actionError.value = error.response?.status === 409
+      ? '服务器仍在保存断线前的内容，请稍后再点结束。'
+      : `结束失败：${error.response?.data?.detail || error.message}`
+  }
+}
 
 // Speaker rename (教授 / 我 / 同学A): non-blocking error line, since an alert
 // would pause the page's event loop while audio is streaming.
@@ -650,6 +777,7 @@ async function onSummary() {
 .draft-choice strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .84rem; }
 .draft-choice span { color: var(--text-muted); font-size: .75rem; }
 .mic-error { padding: .7rem clamp(1rem, 3vw, 2.5rem); color: #8a2c29; background: #fff1f0; border-bottom: 1px solid #edb8b5; font-size: .86rem; }
+.pause-notice { padding: .7rem clamp(1rem, 3vw, 2.5rem); color: #6f4a0c; background: #fff8e9; border-bottom: 1px solid #efd9ad; font-size: .86rem; line-height: 1.5; }
 .mic-diagnostics { padding: .35rem clamp(1rem, 3vw, 2.5rem); color: var(--text-muted); background: #f1f5f9; border-bottom: 1px solid var(--border); font-size: .76rem; }
 .mic-diagnostics summary { cursor: pointer; min-height: 30px; align-content: center; }
 .mic-diagnostics > div { display: flex; flex-wrap: wrap; gap: .3rem 1rem; padding: .3rem 0 .6rem; }

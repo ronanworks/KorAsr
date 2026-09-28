@@ -47,7 +47,8 @@ def recording_metadata(
     has_audio = path is not None and size > 0
     return {
         "available": has_audio,
-        "recording": session.ended_at is None and path is not None,
+        # A paused class's file is closed and fsynced; downloads take a size snapshot.
+        "recording": session.ended_at is None and session.recording_state != "paused" and path is not None,
         "format": "float32le",
         "sample_rate_hz": SAMPLE_RATE,
         "channels": 1,

@@ -16,7 +16,8 @@ const router = createRouter({
 })
 
 router.beforeEach(async to => {
-  if (useSessionStore().isRecording && to.path !== '/') return false
+  // Recording, pausing or reconnecting needs the classroom page; a paused class does not.
+  if (useSessionStore().isLive && to.path !== '/') return false
   if (!to.meta.admin) return
   const auth = useAuthStore()
   if (!auth.ready) {

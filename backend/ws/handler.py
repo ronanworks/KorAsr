@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -14,7 +15,7 @@ from sqlalchemy import update
 from backend.asr.transcriber import Transcriber, transcribe_audio
 from backend.asr.langid import detect_language
 from backend.languages import candidate_languages, translation_target
-from backend.translation.moonshot import translate_stream
+from backend.translation.moonshot import sanitize_translation, translate_stream
 from backend.polish.pipeline import PolishPipeline, parse_speaker_names
 from backend.speaker.embedding import get_embedder, speech_duration_s
 from backend.speaker.tracker import OnlineSpeakerTracker
@@ -30,6 +31,7 @@ POLISH_TICK_SEC = 5             # 每 5s 检查一次是否攒够 60s 已定稿�
 GRACEFUL_FINAL_MIN_SAMPLES = int(16000 * 0.5)  # graceful 收尾时 buffer 不到 0.5s 就不再 ASR
 MAX_AUDIO_MESSAGE_BYTES = SAMPLE_RATE * RAW_SAMPLE_BYTES * 10
 ACCOUNT_RECHECK_INTERVAL_S = 5
+RESUME_WAIT_S = 45              # a reconnect waits this long for the dropped socket's tail work
 
 # One GPU slot at a time — module-level so it is shared across ALL sessions.
 # On a single-GPU machine this is the correct behaviour: concurrent sessions
@@ -40,28 +42,64 @@ ACCOUNT_RECHECK_INTERVAL_S = 5
 _gpu_sem = asyncio.Semaphore(1)
 
 
-def _claim_recording(session_id: str, user_id: str) -> bool:
-    """Atomically win the race against a second WS or an empty-session delete."""
+@dataclass
+class _Connection:
+    """A recording socket of this process; `closing` once its tail work has begun."""
+    closing: bool = False
+    done: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+# session id -> the connection currently recording it (one process serves all sockets).
+_connections: dict[str, _Connection] = {}
+
+
+async def _wait_for_dropped_connection(session_id: str) -> None:
+    """A reconnect right after a drop finds the class still 'recording' while the old
+    socket saves its last sentence and minute; wait so it resumes instead of failing.
+    A socket that is still receiving audio is never waited for (second tabs are refused)."""
+    previous = _connections.get(session_id)
+    if previous is None or not previous.closing:
+        return
+    try:
+        await asyncio.wait_for(previous.done.wait(), RESUME_WAIT_S)
+    except asyncio.TimeoutError:
+        print(f"[WS] Session {session_id}: previous connection still finishing after {RESUME_WAIT_S}s")
+
+
+def _claim_recording(session_id: str, user_id: str) -> str | None:
+    """Atomically move created|paused → recording; return the state it left, or None.
+
+    Conditional UPDATEs let exactly one party win against a second WebSocket, a
+    delete or the REST end endpoint. A resumed class keeps its original start time.
+    """
     recording_started_at = datetime.now(timezone.utc)
     with DBSession(engine) as db:
-        claimed = db.execute(
-            update(SessionModel)
-            .where(
-                SessionModel.id == session_id,
-                SessionModel.user_id == user_id,
-                SessionModel.recording_state == "created",
+        for previous, values in (
+            ("created", {"recording_state": "recording", "started_at": recording_started_at}),
+            ("paused", {"recording_state": "recording"}),
+        ):
+            claimed = db.execute(
+                update(SessionModel)
+                .where(
+                    SessionModel.id == session_id,
+                    SessionModel.user_id == user_id,
+                    SessionModel.recording_state == previous,
+                    SessionModel.ended_at.is_(None),
+                )
+                .values(**values)
             )
-            .values(recording_state="recording", started_at=recording_started_at)
-        )
-        if claimed.rowcount != 1:
-            db.rollback()
-            return False
-        db.commit()
-        return True
+            if claimed.rowcount == 1:
+                db.commit()
+                return previous
+        db.rollback()
+        return None
 
 
-def _release_unstarted_claim(session_id: str, user_id: str) -> None:
-    """Let the owner retry when storage failed before any PCM was created."""
+def _release_unstarted_claim(session_id: str, user_id: str, state: str = "created") -> None:
+    """Let the owner retry when storage failed before this connection recorded anything.
+
+    state is what the claim left: 'created' for a new class, 'paused' for a resume.
+    """
     with DBSession(engine) as db:
         db.execute(
             update(SessionModel)
@@ -70,8 +108,116 @@ def _release_unstarted_claim(session_id: str, user_id: str) -> None:
                 SessionModel.user_id == user_id,
                 SessionModel.recording_state == "recording",
             )
-            .values(recording_state="created")
+            .values(recording_state=state)
         )
+        db.commit()
+
+
+def _load_resume_state(session_id: str) -> dict:
+    """What a resumed connection continues from: sequence, language, speakers."""
+    with DBSession(engine) as db:
+        sess = db.get(SessionModel, session_id)
+        last = db.exec(
+            select(Segment)
+            .where(Segment.session_id == session_id)
+            .order_by(Segment.sequence.desc())
+            .limit(1)
+        ).first()
+        raw_speakers = getattr(sess, "speaker_state", None) if sess else None
+        next_sequence = last.sequence + 1 if last else 0
+        last_lang = last.lang if last else None
+    try:
+        speaker_state = json.loads(raw_speakers) if raw_speakers else None
+    except (TypeError, ValueError):
+        speaker_state = None
+    return {
+        "next_sequence": next_sequence,
+        "last_lang": last_lang,
+        "speaker_state": speaker_state if isinstance(speaker_state, dict) else None,
+    }
+
+
+def _start_audio_clock(transcriber, start_samples: int) -> None:
+    """Reset the stream; its audio-sample clock starts at start_samples.
+
+    A resumed class appends to the existing PCM, so new start/end/timestamp values
+    must continue after the audio recorded before the pause. backend/asr is shared
+    with the ASR experiments, so the seed is applied here, not as a Transcriber API.
+    """
+    transcriber.reset()
+    start = max(0, int(start_samples))
+    transcriber._total_samples = start
+    transcriber.last_commit_span = (start, start)
+
+
+def _align_recording(raw_pcm_file) -> int:
+    """Samples already in a PCM opened for append.
+
+    A crash can cut the last float32 sample short; complete it with zero bytes so
+    appended audio stays sample-aligned. Nothing already written is changed.
+    """
+    size = os.fstat(raw_pcm_file.fileno()).st_size
+    partial = size % RAW_SAMPLE_BYTES
+    if partial:
+        raw_pcm_file.write(b"\0" * (RAW_SAMPLE_BYTES - partial))
+        raw_pcm_file.flush()
+        size += RAW_SAMPLE_BYTES - partial
+        print(f"[WS] completed a partial sample at the end of {raw_pcm_file.name!r}")
+    return size // RAW_SAMPLE_BYTES
+
+
+def _discard_unused_recording(raw_pcm_path) -> bool:
+    """Remove the empty PCM a new class's connection created and never wrote to."""
+    try:
+        if raw_pcm_path.stat().st_size == 0:
+            raw_pcm_path.unlink()
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def _recorded_seconds(raw_pcm_path) -> int | None:
+    """Recorded audio seconds from the PCM size; pauses are not in the file."""
+    try:
+        return raw_pcm_path.stat().st_size // (SAMPLE_RATE * RAW_SAMPLE_BYTES)
+    except OSError:
+        return None
+
+
+def _speaker_state_json(tracker) -> str | None:
+    try:
+        return json.dumps(tracker.export_state())
+    except Exception as exc:
+        print(f"[Speaker] could not export state: {type(exc).__name__}: {ascii(str(exc))}")
+        return None
+
+
+def _save_speaker_state(session_id: str, state_json: str) -> None:
+    with DBSession(engine) as db:
+        sess = db.get(SessionModel, session_id)
+        if sess is not None:
+            sess.speaker_state = state_json
+            db.commit()
+
+
+def _close_recording(
+    session_id: str, state: str, speaker_state: str | None, recorded_seconds: int | None,
+) -> None:
+    """End one connection: 'paused' keeps the class resumable, 'ended' closes it."""
+    with DBSession(engine) as db:
+        sess = db.get(SessionModel, session_id)
+        if sess is None or sess.ended_at is not None:
+            return
+        if speaker_state is not None:
+            sess.speaker_state = speaker_state
+        if recorded_seconds is not None:
+            sess.duration_seconds = recorded_seconds
+        if state == "ended":
+            sess.ended_at = datetime.now(timezone.utc)
+            sess.recording_state = "ended"
+        else:
+            sess.recording_state = "paused"
         db.commit()
 
 
@@ -141,63 +287,38 @@ async def handle_ws(websocket: WebSocket, session_id: str):
     candidates = candidate_languages(source_lang, target_lang, bidirectional)
     transcriber = Transcriber(language=source_lang)
 
-    if not _claim_recording(session_id, session_user_id):
+    await _wait_for_dropped_connection(session_id)
+    previous_state = _claim_recording(session_id, session_user_id)
+    if previous_state is None:
         await websocket.close(code=4009, reason="Session already recording or deleted")
         return
-    transcriber.reset(time.time() * 1000)
+    # A paused class continues: same PCM, audio clock, sequence, polish and speakers.
+    resuming = previous_state == "paused"
 
     try:
         raw_pcm_path = recording_path(session_id)
     except ValueError:
-        _release_unstarted_claim(session_id, session_user_id)
+        _release_unstarted_claim(session_id, session_user_id, previous_state)
         await websocket.close(code=1008, reason="Invalid session ID")
         return
     try:
         raw_pcm_path.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic creation prevents two WebSockets, including across processes,
-        # from writing the same recording. Never truncate a prior recording.
-        raw_pcm_file = raw_pcm_path.open("xb")
+        # New class: atomic creation prevents two WebSockets, including across
+        # processes, from writing the same recording. Resume: append after the
+        # audio saved before the pause. Neither mode ever truncates a recording.
+        raw_pcm_file = raw_pcm_path.open("ab" if resuming else "xb")
     except FileExistsError:
         # A pre-existing archive may be incomplete after a crash. Keep the
         # claimed state for recovery; never overwrite or unlink its bytes.
         await websocket.close(code=4009, reason="Session recording already exists")
         return
     except OSError as exc:
-        if not raw_pcm_path.exists():
-            _release_unstarted_claim(session_id, session_user_id)
+        if resuming or not raw_pcm_path.exists():
+            _release_unstarted_claim(session_id, session_user_id, previous_state)
         print(f"[WS] Could not create recording: {type(exc).__name__}: {exc}")
         await websocket.close(code=1011, reason="Recording storage unavailable")
         return
-    try:
-        await websocket.accept()
-    except BaseException:
-        raw_pcm_file.close()
-        _finalize_session(session_id)
-        raise
 
-    last_interim_time = time.time()
-    segment_counter = 0
-    current_seg_id: str | None = None
-    rolling_context: str = ""   # grows with each confirmed final segment
-    final_tasks: set[asyncio.Task] = set()
-    interim_tasks: set[asyncio.Task] = set()
-    # Start time of finals still being recognised/translated. The polish window
-    # must end before them so every sentence it reads is already in the DB.
-    inflight_starts: dict[str, int] = {}
-    last_lang: str | None = source_lang if len(candidates) == 1 else None
-    speaker_tracker = (
-        OnlineSpeakerTracker.from_settings() if hasattr(OnlineSpeakerTracker, "from_settings")
-        else OnlineSpeakerTracker()
-    )
-    embedder = get_embedder()
-    last_speaker_end_ms: int | None = None
-    announced_speakers = 0
-    speaker_lock = asyncio.Lock()
-
-    print(
-        f"[WS] Session {session_id} connected; raw PCM -> {ascii(str(raw_pcm_path))}; "
-        f"languages={'/'.join(candidates)} speakers={'on' if embedder else 'off'}"
-    )
     send_lock = asyncio.Lock()
 
     async def _safe_send(data: dict) -> bool:
@@ -208,7 +329,58 @@ async def handle_ws(websocket: WebSocket, session_id: str):
         except Exception:
             return False
 
-    polish = PolishPipeline(session_id, source_lang, target_lang, raw_pcm_path, _gpu_sem, _safe_send)
+    def _abandon_claim() -> None:
+        """This connection recorded nothing: give the class back as it was."""
+        raw_pcm_file.close()
+        if resuming or _discard_unused_recording(raw_pcm_path):
+            _release_unstarted_claim(session_id, session_user_id, previous_state)
+        else:
+            # The empty file of a new class could not be removed: appending to it is safe.
+            _release_unstarted_claim(session_id, session_user_id, "paused")
+
+    try:
+        polish = PolishPipeline(session_id, source_lang, target_lang, raw_pcm_path, _gpu_sem, _safe_send)
+        speaker_tracker = (
+            OnlineSpeakerTracker.from_settings() if hasattr(OnlineSpeakerTracker, "from_settings")
+            else OnlineSpeakerTracker()
+        )
+        recorded_samples = 0
+        resume = None
+        if resuming:
+            recorded_samples = _align_recording(raw_pcm_file)
+            resume = await asyncio.to_thread(_load_resume_state, session_id)
+            await asyncio.to_thread(polish.restore, recorded_samples * 1000 // SAMPLE_RATE)
+            if resume["speaker_state"]:
+                # Same numbers as before the pause, so 说话人 2 stays the same person.
+                try:
+                    speaker_tracker.load_state(resume["speaker_state"])
+                except Exception as exc:
+                    print(f"[Speaker] saved state unusable, numbering restarts: {type(exc).__name__}: {exc}")
+        _start_audio_clock(transcriber, recorded_samples)
+        embedder = get_embedder()
+    except Exception as exc:
+        print(f"[WS] Session {session_id} could not start: {type(exc).__name__}: {exc}")
+        _abandon_claim()
+        await websocket.close(code=1011, reason="Could not start recording")
+        return
+
+    last_interim_time = time.time()
+    segment_counter = resume["next_sequence"] if resume else 0
+    current_seg_id: str | None = None
+    rolling_context: str = ""   # grows with each confirmed final segment
+    final_tasks: set[asyncio.Task] = set()
+    interim_tasks: set[asyncio.Task] = set()
+    # Start time of finals still being recognised/translated. The polish window
+    # must end before them so every sentence it reads is already in the DB.
+    inflight_starts: dict[str, int] = {}
+    if len(candidates) == 1:
+        last_lang: str | None = source_lang
+    else:
+        last_lang = resume["last_lang"] if resume and resume["last_lang"] in candidates else None
+    # A pause is a real gap: no speaker continuity across it.
+    last_speaker_end_ms: int | None = None
+    announced_speakers = speaker_tracker.speaker_count
+    speaker_lock = asyncio.Lock()
 
     def _settled_end_ms() -> int:
         """Audio time before which every utterance has been finalized and saved.
@@ -221,6 +393,16 @@ async def handle_ws(websocket: WebSocket, session_id: str):
         if inflight_starts:
             end = min(end, min(inflight_starts.values()))
         return end
+
+    async def _checkpoint_speakers():
+        """Save the speaker state once a minute so even a server crash resumes with it."""
+        state = _speaker_state_json(speaker_tracker)
+        if state is None:
+            return
+        try:
+            await asyncio.to_thread(_save_speaker_state, session_id, state)
+        except Exception as exc:
+            print(f"[Speaker] could not save state: {type(exc).__name__}: {exc}")
 
     # ── 每分钟精修：按音频时钟攒够 60s 已定稿内容就处理一个窗口 ─────────
     polish_stop = asyncio.Event()
@@ -235,9 +417,12 @@ async def handle_ws(websocket: WebSocket, session_id: str):
                 if polish_stop.is_set():
                     break
                 try:
-                    await polish.run_due(_settled_end_ms(), send_ws=True)
+                    processed = await polish.run_due(_settled_end_ms(), send_ws=True)
                 except Exception as e:
                     print(f"[Polish] iteration error (loop continues): {type(e).__name__}: {e}")
+                    processed = False
+                if processed and embedder is not None:
+                    await _checkpoint_speakers()
         except asyncio.CancelledError:
             return
 
@@ -252,6 +437,13 @@ async def handle_ws(websocket: WebSocket, session_id: str):
         if len(candidates) > 1 and not fast:
             print(f"[LangID] final dur={len(audio)/16000:.2f}s share={decision.share:.2f} -> {decision.language}")
         return decision.language, text
+
+    async def _announce_speakers(count: int) -> None:
+        names = await asyncio.to_thread(_speaker_names, session_id)
+        await _safe_send({
+            "status": "speakers",
+            "speakers": [{"index": i, "name": names.get(str(i))} for i in range(count)],
+        })
 
     async def _assign_speaker(audio: np.ndarray, start_ms: int, end_ms: int) -> int | None:
         nonlocal last_speaker_end_ms, announced_speakers
@@ -272,11 +464,7 @@ async def handle_ws(websocket: WebSocket, session_id: str):
             last_speaker_end_ms = max(end_ms, last_speaker_end_ms or 0)
         if speaker_tracker.speaker_count > announced_speakers:
             announced_speakers = speaker_tracker.speaker_count
-            names = await asyncio.to_thread(_speaker_names, session_id)
-            await _safe_send({
-                "status": "speakers",
-                "speakers": [{"index": i, "name": names.get(str(i))} for i in range(announced_speakers)],
-            })
+            await _announce_speakers(announced_speakers)
         return assignment.speaker
 
     # ── 单段 final segment 处理（语言识别 → 识别 → 说话人 → 存原文 → 翻译 → 更新 DB → 推 WS）
@@ -371,6 +559,11 @@ async def handle_ws(websocket: WebSocket, session_id: str):
             print(f"[WS final ] seg={seg_id[:8]} translation failed: {type(e).__name__}: {e}")
 
         if translation_complete and zh_acc:
+            # The model sometimes explains an unintelligible clip instead of translating it.
+            cleaned = sanitize_translation(ko, zh_acc)
+            if cleaned != zh_acc:
+                print(f"[WS final ] seg={seg_id[:8]} translation replaced ({len(zh_acc)} chars were explanation)")
+            zh_acc = cleaned
             with DBSession(engine) as db:
                 seg = db.get(Segment, seg_id)
                 if seg:
@@ -417,7 +610,7 @@ async def handle_ws(websocket: WebSocket, session_id: str):
             await asyncio.gather(*pending, return_exceptions=True)
             final_tasks.difference_update(pending)
 
-    # 正常 stop 与意外断开都提交尚未切段的尾音。
+    # stop、pause 与意外断开都提交尚未切段的尾音。
     def _flush_tail(send_ws):
         nonlocal current_seg_id, segment_counter
 
@@ -433,13 +626,37 @@ async def handle_ws(websocket: WebSocket, session_id: str):
         else:
             print("[WS] no verified speech in tail, skip final ASR")
 
-    polish_task = asyncio.create_task(_polish_loop())
-    graceful = False
+    # "stop" ends the class. "pause", a dropped socket or a server-side close all
+    # leave it paused, so only an explicit stop (or REST end) can end a class.
+    end_mode: str | None = None
+    polish_task = None
+
+    try:
+        await websocket.accept()
+    except BaseException:
+        _abandon_claim()
+        raise
+    connection = _Connection()
+    _connections[session_id] = connection
     last_account_check = time.monotonic()
 
     try:
+        print(
+            f"[WS] Session {session_id} "
+            f"{f'resumed at {recorded_samples // SAMPLE_RATE}s' if resuming else 'connected'}; "
+            f"raw PCM -> {ascii(str(raw_pcm_path))}; "
+            f"languages={'/'.join(candidates)} speakers={'on' if embedder else 'off'}"
+        )
+        polish_task = asyncio.create_task(_polish_loop())
+        if resuming and announced_speakers:
+            # The client may have reloaded; tell it the speakers known before the pause.
+            try:
+                await _announce_speakers(announced_speakers)
+            except Exception as exc:
+                print(f"[Speaker] re-announce failed: {type(exc).__name__}: {exc}")
+
         while True:
-            # 用底层 receive() 同时接 bytes（PCM）和 text（控制消息如 stop）
+            # 用底层 receive() 同时接 bytes（PCM）和 text（控制消息 stop / pause）
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
                 raise WebSocketDisconnect()
@@ -530,50 +747,64 @@ async def handle_ws(websocket: WebSocket, session_id: str):
                     _schedule_final(final_audio, final_id, _commit_span(), seq, ctx)
 
             elif message.get("text"):
-                # 控制消息：目前仅支持 {"action": "stop"} —— graceful 关闭信号
+                # 控制消息：{"action": "stop"} 结束课堂；{"action": "pause"} 暂停（可继续）
                 try:
                     ctrl = json.loads(message["text"])
                 except json.JSONDecodeError:
                     continue
-                if ctrl.get("action") == "stop":
-                    graceful = True
-                    print(f"[WS] Session {session_id} graceful stop signal received")
+                action = ctrl.get("action") if isinstance(ctrl, dict) else None
+                if action in ("stop", "pause"):
+                    end_mode = action
+                    print(f"[WS] Session {session_id} {action} signal received")
                     break
 
     except WebSocketDisconnect:
-        print(f"[WS] Session {session_id} disconnected (abrupt)")
+        print(f"[WS] Session {session_id} disconnected (abrupt); the class will be paused")
     finally:
+        connection.closing = True
+        # Only a client that asked to stop or pause is still listening.
+        graceful = end_mode is not None
         try:
-            # Let in-flight inference finish before the GPU slot can be reused.
-            # Cancelling asyncio.to_thread would release the semaphore while its
-            # model worker is still running on the same GPU.
-            polish_stop.set()
-            await polish_task
-            if interim_tasks:
-                await asyncio.gather(*tuple(interim_tasks), return_exceptions=True)
-
             try:
-                _flush_tail(send_ws=graceful)
-            except Exception as e:
-                print(f"[WS] tail flush failed: {type(e).__name__}: {e}")
+                # Let in-flight inference finish before the GPU slot can be reused.
+                # Cancelling asyncio.to_thread would release the semaphore while its
+                # model worker is still running on the same GPU.
+                polish_stop.set()
+                if polish_task is not None:
+                    await polish_task
+                if interim_tasks:
+                    await asyncio.gather(*tuple(interim_tasks), return_exceptions=True)
 
-            # 先等所有 final 写入 DB，再精修最后窗口。
-            await _drain_final_tasks()
+                try:
+                    _flush_tail(send_ws=graceful)
+                except Exception as e:
+                    print(f"[WS] tail flush failed: {type(e).__name__}: {e}")
 
-            try:
-                raw_pcm_file.flush()
-                await polish.finish(transcriber.total_ms, send_ws=graceful)
-            except Exception as e:
-                print(f"[WS] tail polish failed: {type(e).__name__}: {e}")
-        finally:
-            try:
-                raw_pcm_file.flush()
-                os.fsync(raw_pcm_file.fileno())
-            except Exception as e:
-                print(f"[WS] raw PCM sync failed: {type(e).__name__}: {e}")
+                # 先等所有 final 写入 DB，再精修最后窗口（暂停也要精修暂停前这一分钟）。
+                await _drain_final_tasks()
+
+                try:
+                    raw_pcm_file.flush()
+                    await polish.finish(transcriber.total_ms, send_ws=graceful)
+                except Exception as e:
+                    print(f"[WS] tail polish failed: {type(e).__name__}: {e}")
             finally:
-                raw_pcm_file.close()
+                try:
+                    raw_pcm_file.flush()
+                    os.fsync(raw_pcm_file.fileno())
+                except Exception as e:
+                    print(f"[WS] raw PCM sync failed: {type(e).__name__}: {e}")
+                finally:
+                    raw_pcm_file.close()
 
+            # Save the state before closing the socket: the client may resume at once.
+            _close_recording(
+                session_id,
+                "ended" if end_mode == "stop" else "paused",
+                _speaker_state_json(speaker_tracker),
+                _recorded_seconds(raw_pcm_path),
+            )
+        finally:
             try:
                 if graceful:
                     try:
@@ -581,19 +812,6 @@ async def handle_ws(websocket: WebSocket, session_id: str):
                     except Exception:
                         pass
             finally:
-                _finalize_session(session_id)
-
-
-def _finalize_session(session_id: str):
-    with DBSession(engine) as db:
-        sess = db.get(SessionModel, session_id)
-        if sess and sess.ended_at is None:
-            now = datetime.now(timezone.utc)
-            sess.ended_at = now
-            sess.recording_state = "ended"
-            if sess.started_at:
-                started = sess.started_at
-                if started.tzinfo is None:
-                    started = started.replace(tzinfo=timezone.utc)
-                sess.duration_seconds = int((now - started).total_seconds())
-            db.commit()
+                connection.done.set()
+                if _connections.get(session_id) is connection:
+                    del _connections[session_id]

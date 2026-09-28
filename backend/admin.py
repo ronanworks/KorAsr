@@ -27,7 +27,9 @@ def main() -> None:
     reset.add_argument("--username", required=True)
     args = parser.parse_args()
 
-    init_db()
+    # The server may be running and recording right now: migrate only, never
+    # treat its live 'recording' classes as crash leftovers.
+    init_db(recover_recordings=False)
     with DBSession(engine) as db:
         try:
             if args.command == "create-user":

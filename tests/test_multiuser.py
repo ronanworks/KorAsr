@@ -216,7 +216,9 @@ class LegacyMigrationTests(unittest.TestCase):
             with patch.object(settings, "raw_audio_dir", str(raw_dir)):
                 db_module.init_db(engine)
             with DBSession(engine) as db:
-                self.assertEqual(db.get(SessionModel, active_id).recording_state, "recording")
+                # Recorded but never ended: protected from "empty draft" handling and,
+                # since no socket survives a restart, resumable (paused), not recording.
+                self.assertEqual(db.get(SessionModel, active_id).recording_state, "paused")
                 self.assertEqual(db.get(SessionModel, ended_id).recording_state, "ended")
                 self.assertEqual(db.get(SessionModel, empty_id).recording_state, "created")
             self.assertEqual((raw_dir / f"{active_id}.pcm").read_bytes(), b"synthetic PCM")

@@ -24,16 +24,16 @@
       </router-link>
       <nav class="primary-nav" aria-label="主导航">
         <router-link to="/">实时课堂</router-link>
-        <span v-if="session.isRecording" class="nav-disabled" aria-disabled="true" title="结束录音后可查看课堂记录">课堂记录</span>
+        <span v-if="session.isLive" class="nav-disabled" aria-disabled="true" title="暂停或结束录音后可查看课堂记录">课堂记录</span>
         <router-link v-else to="/history">课堂记录</router-link>
         <template v-if="auth.user?.is_admin">
-          <span v-if="session.isRecording" class="nav-disabled" aria-disabled="true" title="结束录音后可管理账号">账号管理</span>
+          <span v-if="session.isLive" class="nav-disabled" aria-disabled="true" title="暂停或结束录音后可管理账号">账号管理</span>
           <router-link v-else to="/admin/users">账号管理</router-link>
         </template>
       </nav>
       <div class="account-actions">
         <span class="account-name" :title="auth.user?.username">{{ auth.user?.username }}</span>
-        <button class="button button-quiet" type="button" :disabled="session.isRecording || session.isFinalizing" :title="session.isRecording || session.isFinalizing ? '请先保存录音' : '退出账号'" @click="logout">退出</button>
+        <button class="button button-quiet" type="button" :disabled="session.isLive || session.isFinalizing" :title="session.isLive || session.isFinalizing ? '请先暂停或保存录音' : '退出账号'" @click="logout">退出</button>
       </div>
     </header>
     <router-view class="route-view" />
@@ -88,7 +88,7 @@ async function login() {
 }
 
 async function logout() {
-  if (session.isRecording || session.isFinalizing) return
+  if (session.isLive || session.isFinalizing) return
   try { await auth.logout() }
   catch (_) {
     alert('退出失败，请检查网络连接后重试。')

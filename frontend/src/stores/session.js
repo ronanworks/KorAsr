@@ -4,7 +4,14 @@ import { ref, computed } from 'vue'
 import axios from 'axios'
 import { isSpeakerIndex, mergeSpeakerList, normalizeSpeakerName, SPEAKER_NAME_MAX } from '../utils/speakers.js'
 import { normalizeOutline, normalizePolishChunk, upsertPolishChunk } from '../utils/polish.js'
-import { mergeSegmentUpdate } from '../utils/segments.js'
+import { mergeSegmentUpdate, segmentFromRecord } from '../utils/segments.js'
+
+// Automatic reconnects after an unexpected close (Wi-Fi/Tailscale hiccup, laptop
+// sleep). The server pauses a class whose socket drops, so each attempt resumes it.
+export const RECONNECT_DELAYS_MS = [2000, 5000, 10000]
+// A WebSocket is in use or about to be; leaving the classroom would strand it.
+const LIVE_STATUSES = ['connecting', 'capturing', 'pausing', 'reconnecting', 'resuming']
+const CONNECT_FAILED = '无法连接录音服务，请检查网络后重试'
 
 // Trailing option of prepare/update: { bidirectional } or a plain boolean.
 function bidirectionalOption(options) {
@@ -23,20 +30,37 @@ export const useSessionStore = defineStore('session', () => {
   const bidirectional = ref(true) // 自动识别双语：目标语言的发言反向翻译成源语言
   const speakers = ref({})        // 说话人 index → { index, name }
   const outline = ref(null)       // 课堂脉络 { text, throughMs, updatedAt }
+  // idle | prepared | connecting | capturing | pausing | paused | reconnecting | resuming
+  // | saving | saved | unavailable | unknown
   const recordingStatus = ref('idle')
   const recordingInfo = ref(null)
-  const isRecording = ref(false)
+  const isRecording = ref(false)  // microphone audio is being sent
   const isConnected = ref(false)
   const isFinalizing = ref(false)
   const finalizeWarning = ref(false)
   const elapsedMs = ref(0)
   const notes = ref('')
+  const pauseReason = ref(null)      // user | connection | microphone: why the class is paused
+  const reconnectAttempt = ref(0)    // 1-based attempt while reconnecting
+  const resumeOnOpen = ref(false)    // the history page asked the classroom to resume on open
+
+  const isPaused = computed(() => recordingStatus.value === 'paused')
+  const isLive = computed(() => isRecording.value || LIVE_STATUSES.includes(recordingStatus.value))
 
   let ws = null
+  // The current socket: { socket, sessionId, intent: null|'pause'|'stop', opened, cancelled, reconnect }
+  let connection = null
   let timerInterval = null
+  let timerBaseMs = 0
+  let timerStartedAt = 0
   let notesSaveTimeout = null
   let finalizeNoticeTimeout = null
   let recordingCheckInterval = null
+  let reconnectTimer = null
+  let reconnectToken = 0
+  let reconnectHandler = null
+  // Segment ids on screen when the connection dropped; reconciled once it is back.
+  let shownAtDrop = null
 
   const elapsedFormatted = computed(() => {
     const total = Math.floor(elapsedMs.value / 1000)
@@ -45,12 +69,34 @@ export const useSessionStore = defineStore('session', () => {
     return `${m}:${s}`
   })
 
+  // Wall-clock based, so a throttled background tab still shows the right time.
+  // Frozen while paused; continues from the same total after a resume.
+  function startTimer() {
+    clearInterval(timerInterval)
+    timerBaseMs = elapsedMs.value
+    timerStartedAt = Date.now()
+    timerInterval = setInterval(() => { elapsedMs.value = timerBaseMs + Date.now() - timerStartedAt }, 250)
+  }
+
+  function stopTimer() {
+    if (timerInterval === null) return
+    clearInterval(timerInterval)
+    timerInterval = null
+    elapsedMs.value = timerBaseMs + Date.now() - timerStartedAt
+  }
+
+  function clearTimer() {
+    clearInterval(timerInterval)
+    timerInterval = null
+  }
+
   // Bidirectional defaults to true (contract §1).
   async function prepareSession(name, terms = [], source = 'ko', target = 'zh', options = {}) {
     const twoWay = bidirectionalOption(options) ?? true
     const res = await axios.post('/api/sessions', {
       name, glossary_terms: terms, source_lang: source, target_lang: target, bidirectional: twoWay,
     })
+    cancelReconnect()
     clearTimeout(notesSaveTimeout)
     currentSessionId.value = res.data.id
     sessionName.value = name
@@ -68,6 +114,8 @@ export const useSessionStore = defineStore('session', () => {
     elapsedMs.value = 0
     isFinalizing.value = false
     finalizeWarning.value = false
+    pauseReason.value = null
+    shownAtDrop = null
     return res.data.id
   }
 
@@ -77,6 +125,7 @@ export const useSessionStore = defineStore('session', () => {
       axios.get(`/api/sessions/${sessionId}/glossary`),
     ])
     if (data.session?.recording_state !== 'created') throw new Error('这节课已经开始录音，无法返回准备阶段')
+    cancelReconnect()
     clearTimeout(notesSaveTimeout)
     currentSessionId.value = sessionId
     sessionName.value = data.session.name
@@ -92,6 +141,53 @@ export const useSessionStore = defineStore('session', () => {
     segments.value = []
     polishChunks.value = []
     elapsedMs.value = 0
+    isRecording.value = false
+    isConnected.value = false
+    isFinalizing.value = false
+    finalizeWarning.value = false
+    pauseReason.value = null
+    shownAtDrop = null
+  }
+
+  // Continue a paused class (history page, or after a reload): show everything saved
+  // before the pause — sentences, polish, speakers, outline — then resume from there.
+  async function loadPausedSession(sessionId) {
+    if (isLive.value) throw new Error('请先暂停或结束当前课堂')
+    const [{ data }, glossary, recording] = await Promise.all([
+      axios.get(`/api/sessions/${sessionId}`),
+      axios.get(`/api/sessions/${sessionId}/glossary`),
+      axios.get(`/api/sessions/${sessionId}/recording`).catch(() => ({ data: null })),
+    ])
+    if (data.session?.recording_state !== 'paused') throw new Error('这节课不在暂停状态，无法继续')
+    if (isLive.value) throw new Error('请先暂停或结束当前课堂')
+    cancelReconnect()
+    clearTimeout(notesSaveTimeout)
+    clearTimeout(finalizeNoticeTimeout)
+    clearInterval(recordingCheckInterval)
+    clearTimer()
+    // A class still finishing its stop keeps finishing on the server; stop listening to it.
+    connection = null
+    ws = null
+    currentSessionId.value = sessionId
+    sessionName.value = data.session.name
+    sourceLang.value = data.session.source_lang || 'ko'
+    targetLang.value = data.session.target_lang || 'zh'
+    bidirectional.value = data.session.bidirectional !== false
+    glossaryTerms.value = glossary.data?.terms || []
+    notes.value = data.session.notes || ''
+    segments.value = (data.segments || []).map(segmentFromRecord)
+    polishChunks.value = (data.polished_chunks || []).map(normalizePolishChunk)
+      .reduce((chunks, chunk) => upsertPolishChunk(chunks, chunk), [])
+    speakers.value = mergeSpeakerList({}, data.speakers, { authoritative: true })
+    outline.value = normalizeOutline(data.session.live_outline)
+    // Recorded audio before the pause; the timer continues from here.
+    const recordedSeconds = recording.data?.duration_seconds ?? data.session.duration_seconds ?? 0
+    elapsedMs.value = Math.round(recordedSeconds * 1000)
+    recordingInfo.value = recording.data
+    recordingStatus.value = 'paused'
+    pauseReason.value = null
+    shownAtDrop = null
+    reconnectAttempt.value = 0
     isRecording.value = false
     isConnected.value = false
     isFinalizing.value = false
@@ -118,138 +214,281 @@ export const useSessionStore = defineStore('session', () => {
     if (mode !== undefined) bidirectional.value = mode
   }
 
-  async function startRecording(sessionId = currentSessionId.value) {
-    if (!sessionId || sessionId !== currentSessionId.value) throw new Error('请先保存课堂设置')
-    if (isRecording.value || recordingStatus.value === 'connecting') throw new Error('录音连接已在进行')
-    recordingStatus.value = 'connecting'
-    recordingInfo.value = null
-    isFinalizing.value = false
-    finalizeWarning.value = false
+  function handleMessage(sessionId, event) {
+    if (currentSessionId.value !== sessionId) return
+    const data = JSON.parse(event.data)
+    // 精修块独立通道：每约 60s 一个窗口（要点 + 分说话人 runs），按 id 去重、按窗口顺序排列
+    if (data.status === 'polish') {
+      polishChunks.value = upsertPolishChunk(polishChunks.value, normalizePolishChunk(data))
+      return
+    }
+    if (data.status === 'speakers') {
+      speakers.value = mergeSpeakerList(speakers.value, data.speakers)
+      return
+    }
+    if (data.status === 'outline') {
+      // An empty refresh keeps the last outline rather than hiding it.
+      outline.value = normalizeOutline(data) ?? outline.value
+      return
+    }
+    if (data.status === 'remove') {
+      segments.value = segments.value.filter(s => s.id !== data.id)
+      return
+    }
+    const idx = segments.value.findIndex(s => s.id === data.id)
+    if (idx >= 0) {
+      // stale interim arriving after translating/done → silently discard;
+      // a null speaker/lang/time never erases a known one
+      const merged = mergeSegmentUpdate(segments.value[idx], data)
+      if (merged) segments.value[idx] = merged
+    } else {
+      segments.value.push({ ...data, is_starred: false })
+    }
+  }
 
+  function startRecordingChecks(sessionId) {
+    async function checkRecording() {
+      try {
+        const { data } = await axios.get(`/api/sessions/${sessionId}/recording`)
+        if (currentSessionId.value === sessionId && isRecording.value) recordingInfo.value = data
+      } catch (_) { /* Connection status is reported by the WebSocket. */ }
+    }
+    checkRecording()
+    clearInterval(recordingCheckInterval)
+    recordingCheckInterval = setInterval(checkRecording, 30000)
+  }
+
+  async function confirmSaved(sessionId) {
+    recordingStatus.value = 'saving'
+    try {
+      const { data } = await axios.get(`/api/sessions/${sessionId}/recording`)
+      if (currentSessionId.value === sessionId) {
+        recordingInfo.value = data
+        recordingStatus.value = data.available ? 'saved' : 'unavailable'
+      }
+    } catch (_) {
+      if (currentSessionId.value === sessionId) recordingStatus.value = 'unknown'
+    }
+  }
+
+  // Opens /ws/{id} for a new class or to resume a paused one. Resolves once the socket
+  // is open and the store shows it capturing; rejects (restoring fallbackStatus) if it
+  // closes first.
+  function openSocket(sessionId, fallbackStatus, { reconnect = false } = {}) {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
     let socket
     try {
       socket = new WebSocket(`${protocol}//${location.host}/ws/${sessionId}`)
-      ws = socket
     } catch (error) {
-      recordingStatus.value = 'prepared'
-      throw error
+      recordingStatus.value = fallbackStatus
+      return Promise.reject(error)
     }
-    let resolveConnection
-    let rejectConnection
-    let connectionOpened = false
-    const connectionReady = new Promise((resolve, reject) => {
-      resolveConnection = resolve
-      rejectConnection = reject
-    })
-
-    socket.onopen = () => {
-      if (currentSessionId.value !== sessionId) {
-        rejectConnection(new Error('课堂已切换，录音连接已取消'))
-        socket.close()
-        return
-      }
-      isConnected.value = true
-      isRecording.value = true
-      recordingStatus.value = 'capturing'
-      async function checkRecording() {
-        try {
-          const { data } = await axios.get(`/api/sessions/${sessionId}/recording`)
-          if (currentSessionId.value === sessionId && isRecording.value) recordingInfo.value = data
-        } catch (_) { /* Connection status is reported by the WebSocket. */ }
-      }
-      checkRecording()
-      clearInterval(recordingCheckInterval)
-      recordingCheckInterval = setInterval(checkRecording, 30000)
-      timerInterval = setInterval(() => { elapsedMs.value += 100 }, 100)
-      // The caller must not attach the microphone before these state changes.
-      connectionOpened = true
-      resolveConnection()
-    }
-
-    socket.onmessage = (event) => {
-      if (currentSessionId.value !== sessionId) return
-      const data = JSON.parse(event.data)
-      // 精修块独立通道：每约 60s 一个窗口（要点 + 分说话人 runs），按 id 去重、按窗口顺序排列
-      if (data.status === 'polish') {
-        polishChunks.value = upsertPolishChunk(polishChunks.value, normalizePolishChunk(data))
-        return
-      }
-      if (data.status === 'speakers') {
-        speakers.value = mergeSpeakerList(speakers.value, data.speakers)
-        return
-      }
-      if (data.status === 'outline') {
-        // An empty refresh keeps the last outline rather than hiding it.
-        outline.value = normalizeOutline(data) ?? outline.value
-        return
-      }
-      if (data.status === 'remove') {
-        segments.value = segments.value.filter(s => s.id !== data.id)
-        return
-      }
-      const idx = segments.value.findIndex(s => s.id === data.id)
-      if (idx >= 0) {
-        // stale interim arriving after translating/done → silently discard;
-        // a null speaker/lang/time never erases a known one
-        const merged = mergeSegmentUpdate(segments.value[idx], data)
-        if (merged) segments.value[idx] = merged
-      } else {
-        segments.value.push({ ...data, is_starred: false })
-      }
-    }
-
-    socket.onclose = async () => {
-      if (!connectionOpened) {
-        rejectConnection(new Error('WebSocket closed before recording began'))
-        if (currentSessionId.value === sessionId) recordingStatus.value = 'prepared'
-        return
-      }
-      if (currentSessionId.value !== sessionId) return
-      clearInterval(recordingCheckInterval)
-      isConnected.value = false
-      isRecording.value = false
-      isFinalizing.value = false
-      recordingStatus.value = 'saving'
-      clearTimeout(finalizeNoticeTimeout)
-      clearInterval(timerInterval)
-      if (currentSessionId.value === sessionId) {
-        try {
-          const { data } = await axios.get(`/api/sessions/${sessionId}/recording`)
-          if (currentSessionId.value === sessionId) {
-            recordingInfo.value = data
-            recordingStatus.value = data.available ? 'saved' : 'unavailable'
-          }
-        } catch (_) {
-          if (currentSessionId.value === sessionId) recordingStatus.value = 'unknown'
+    const conn = { socket, sessionId, intent: null, opened: false, cancelled: false, reconnect }
+    connection = conn
+    ws = socket
+    return new Promise((resolve, reject) => {
+      socket.onopen = () => {
+        if (conn.cancelled || connection !== conn || currentSessionId.value !== sessionId) {
+          reject(new Error('课堂已切换，录音连接已取消'))
+          socket.close()   // the server pauses a socket that closes without a stop
+          return
         }
+        conn.opened = true
+        isConnected.value = true
+        isRecording.value = true
+        recordingStatus.value = 'capturing'
+        pauseReason.value = null
+        reconnectAttempt.value = 0
+        finalizeWarning.value = false
+        startRecordingChecks(sessionId)
+        startTimer()
+        const recovering = shownAtDrop
+        shownAtDrop = null
+        // The caller must not attach the microphone before these state changes.
+        resolve()
+        if (recovering) syncAfterDrop(sessionId, recovering)
       }
-    }
+      socket.onmessage = event => handleMessage(sessionId, event)
+      socket.onclose = event => { handleClose(conn, event, reject, fallbackStatus) }
+      // A close event always follows an error; it decides what happens next.
+      socket.onerror = () => { if (!conn.opened) reject(new Error(CONNECT_FAILED)) }
+    })
+  }
 
-    socket.onerror = () => {
-      if (!connectionOpened) {
-        rejectConnection(new Error('WebSocket connection failed'))
-        if (currentSessionId.value === sessionId) recordingStatus.value = 'prepared'
+  async function handleClose(conn, _event, reject, fallbackStatus) {
+    const { sessionId } = conn
+    const isCurrent = connection === conn && !conn.cancelled && currentSessionId.value === sessionId
+    if (!conn.opened) {
+      reject(new Error(CONNECT_FAILED))
+      if (isCurrent) {
+        recordingStatus.value = fallbackStatus
+        connection = null
+        ws = null
       }
-      if (currentSessionId.value !== sessionId) return
-      clearInterval(recordingCheckInterval)
-      isConnected.value = false
-      isRecording.value = false
-      if (connectionOpened) recordingStatus.value = 'saving'
-      clearInterval(timerInterval)
+      return
     }
+    if (!isCurrent) return   // replaced by a newer socket, or another class is shown
+    connection = null
+    ws = null
+    clearInterval(recordingCheckInterval)
+    clearTimeout(finalizeNoticeTimeout)
+    stopTimer()
+    isConnected.value = false
+    isRecording.value = false
+    if (conn.intent === 'pause') {
+      finalizeWarning.value = false
+      recordingStatus.value = 'paused'
+      return
+    }
+    if (conn.intent === 'stop') {
+      isFinalizing.value = false
+      await confirmSaved(sessionId)
+      return
+    }
+    // Unexpected close: the server saves the tail and pauses the class; reconnect to resume.
+    shownAtDrop = new Set(segments.value.map(s => s.id))
+    scheduleReconnect(sessionId)
+  }
 
-    await connectionReady
+  // After a drop the server finished the open sentence, the translations in flight and
+  // the minute's polish without telling anyone. A resumed socket is only accepted once
+  // that is saved, so replace the stale cards with the saved rows. Cards of the new
+  // connection belong to the WebSocket and are left alone.
+  async function syncAfterDrop(sessionId, shownIds) {
+    let data
+    try {
+      ({ data } = await axios.get(`/api/sessions/${sessionId}`))
+    } catch (_) { return }
+    if (currentSessionId.value !== sessionId || data?.session?.id !== sessionId || !Array.isArray(data.segments)) return
+    const current = segments.value
+    const liveIds = new Set(current.filter(s => !shownIds.has(s.id)).map(s => s.id))
+    const saved = data.segments.filter(row => !liveIds.has(row.id)).map(segmentFromRecord)
+    const savedIds = new Set(saved.map(s => s.id))
+    segments.value = [...saved, ...current.filter(s => liveIds.has(s.id) && !savedIds.has(s.id))]
+    polishChunks.value = (data.polished_chunks || []).map(normalizePolishChunk)
+      .reduce((chunks, chunk) => upsertPolishChunk(chunks, chunk), polishChunks.value)
+    speakers.value = mergeSpeakerList(speakers.value, data.speakers, { authoritative: true })
+    outline.value = normalizeOutline(data.session.live_outline) ?? outline.value
+  }
+
+  function cancelReconnect() {
+    reconnectToken += 1
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+    // A reconnect socket still opening must not take over after the user chose otherwise.
+    if (connection && connection.reconnect && !connection.opened) {
+      connection.cancelled = true
+      try { connection.socket.close() } catch (_) {}
+      connection = null
+      ws = null
+    }
+  }
+
+  function scheduleReconnect(sessionId) {
+    cancelReconnect()
+    const token = reconnectToken
+    recordingStatus.value = 'reconnecting'
+    pauseReason.value = 'connection'
+    reconnectAttempt.value = 0
+    const next = () => {
+      const index = reconnectAttempt.value
+      if (index >= RECONNECT_DELAYS_MS.length) {
+        recordingStatus.value = 'paused'   // 连接中断，已暂停，可点继续恢复
+        return
+      }
+      reconnectTimer = setTimeout(async () => {
+        if (token !== reconnectToken || currentSessionId.value !== sessionId) return
+        reconnectAttempt.value = index + 1
+        try {
+          await openSocket(sessionId, 'reconnecting', { reconnect: true })
+        } catch (_) {
+          if (token === reconnectToken && currentSessionId.value === sessionId) next()
+          return
+        }
+        try {
+          await reconnectHandler?.()
+        } catch (_) {
+          // Connected but without a microphone: pause rather than record silence.
+          pauseSession('microphone')
+        }
+      }, RECONNECT_DELAYS_MS[index])
+    }
+    next()
+  }
+
+  // The classroom view re-acquires the microphone after an automatic reconnect.
+  function setReconnectHandler(handler) {
+    reconnectHandler = handler
+  }
+
+  async function startRecording(sessionId = currentSessionId.value) {
+    if (!sessionId || sessionId !== currentSessionId.value) throw new Error('请先保存课堂设置')
+    if (isLive.value) throw new Error('录音连接已在进行')
+    recordingStatus.value = 'connecting'
+    recordingInfo.value = null
+    isFinalizing.value = false
+    finalizeWarning.value = false
+    pauseReason.value = null
+    await openSocket(sessionId, 'prepared')
     return sessionId
+  }
+
+  // “继续”: a new WebSocket to the same class. Nothing shown is cleared; the server
+  // continues the recording, timestamps, sentence numbers, polish and speaker numbers.
+  async function resumeRecording() {
+    const sessionId = currentSessionId.value
+    if (!sessionId || !['paused', 'reconnecting'].includes(recordingStatus.value)) {
+      throw new Error('只能继续已暂停的课堂')
+    }
+    cancelReconnect()
+    recordingStatus.value = 'resuming'
+    finalizeWarning.value = false
+    await openSocket(sessionId, 'paused')
+    return sessionId
+  }
+
+  // “暂停”: the server saves the last sentence and polishes the minute before the
+  // break, then closes the socket. Everything shown stays; the class can resume.
+  function pauseSession(reason = 'user') {
+    if (recordingStatus.value === 'reconnecting') {
+      cancelReconnect()
+      recordingStatus.value = 'paused'
+      pauseReason.value = reason
+      return true
+    }
+    const conn = connection
+    if (!conn || !conn.opened || !isRecording.value) return false
+    conn.intent = 'pause'
+    isRecording.value = false   // the classroom view releases the microphone
+    stopTimer()
+    clearInterval(recordingCheckInterval)
+    pauseReason.value = reason
+    recordingStatus.value = 'pausing'
+    finalizeWarning.value = false
+    try {
+      conn.socket.send(JSON.stringify({ action: 'pause' }))
+    } catch (_) {
+      // The server pauses a dropped socket as well.
+      try { conn.socket.close() } catch (__) {}
+      return true
+    }
+    clearTimeout(finalizeNoticeTimeout)
+    finalizeNoticeTimeout = setTimeout(() => { finalizeWarning.value = true }, 30000)
+    return true
   }
 
   function stopSession() {
     if (isFinalizing.value) return
+    cancelReconnect()
+    const conn = connection
     isRecording.value = false   // 立即让 ClassroomView 的 watch 关麦克风、不再 _sendAudio
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
+    stopTimer()
+    if (!conn || !ws || ws.readyState !== WebSocket.OPEN) {
+      if (conn) conn.intent = 'stop'
       try { ws && ws.close() } catch (_) {}
       return
     }
+    conn.intent = 'stop'
     isFinalizing.value = true
     recordingStatus.value = 'saving'
     finalizeWarning.value = false
@@ -262,7 +501,29 @@ export const useSessionStore = defineStore('session', () => {
       return
     }
     // 收尾可能包含长稿 ASR 和整段翻译。只提示耗时，不截断服务端写库。
+    clearTimeout(finalizeNoticeTimeout)
     finalizeNoticeTimeout = setTimeout(() => { finalizeWarning.value = true }, 30000)
+  }
+
+  // “结束” while paused: there is no socket, so the REST endpoint ends the class.
+  async function endPausedSession() {
+    const sessionId = currentSessionId.value
+    if (!sessionId || !['paused', 'reconnecting'].includes(recordingStatus.value)) {
+      throw new Error('只能结束已暂停的课堂')
+    }
+    cancelReconnect()
+    const reason = pauseReason.value
+    recordingStatus.value = 'saving'
+    try {
+      await axios.post(`/api/sessions/${sessionId}/end`)
+    } catch (error) {
+      if (currentSessionId.value === sessionId && recordingStatus.value === 'saving') {
+        recordingStatus.value = 'paused'
+        pauseReason.value = reason
+      }
+      throw error
+    }
+    if (currentSessionId.value === sessionId) await confirmSaved(sessionId)
   }
 
   async function updateGlossary(terms) {
@@ -280,17 +541,17 @@ export const useSessionStore = defineStore('session', () => {
     if (!isSpeakerIndex(index)) throw new Error('说话人编号无效')
     const cleaned = normalizeSpeakerName(name)
     if (cleaned && [...cleaned].length > SPEAKER_NAME_MAX) throw new Error(`说话人名称最多 ${SPEAKER_NAME_MAX} 个字`)
-    const isLive = () => sessionId === currentSessionId.value
+    const isLiveSession = () => sessionId === currentSessionId.value
     const hadEntry = Object.prototype.hasOwnProperty.call(speakers.value, index)
     const previous = speakers.value[index]
-    if (isLive()) speakers.value = { ...speakers.value, [index]: { ...previous, index, name: cleaned } }
+    if (isLiveSession()) speakers.value = { ...speakers.value, [index]: { ...previous, index, name: cleaned } }
     try {
       const { data } = await axios.put(`/api/sessions/${sessionId}/speakers/${index}`, { name: cleaned })
       const list = Array.isArray(data?.speakers) ? data.speakers : []
-      if (isLive()) speakers.value = mergeSpeakerList(speakers.value, list, { authoritative: true })
+      if (isLiveSession()) speakers.value = mergeSpeakerList(speakers.value, list, { authoritative: true })
       return list
     } catch (error) {
-      if (isLive()) {
+      if (isLiveSession()) {
         const restored = { ...speakers.value }
         if (hadEntry) restored[index] = previous
         else delete restored[index]
@@ -330,12 +591,19 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   function resetSession() {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify({ action: 'stop' })) } catch (_) {}
-    }
-    try { ws?.close() } catch (_) {}
+    cancelReconnect()
+    // Detach first so the close below is never taken for a dropped connection.
+    const conn = connection
+    const socket = ws
+    connection = null
     ws = null
-    clearInterval(timerInterval)
+    if (conn) conn.cancelled = true
+    // Leaving a class never ends it: a recording socket is paused, resumable later.
+    if (conn?.opened && !conn.intent && socket && socket.readyState === WebSocket.OPEN) {
+      try { socket.send(JSON.stringify({ action: 'pause' })) } catch (_) {}
+    }
+    try { socket?.close() } catch (_) {}
+    clearTimer()
     clearInterval(recordingCheckInterval)
     clearTimeout(notesSaveTimeout)
     clearTimeout(finalizeNoticeTimeout)
@@ -357,15 +625,20 @@ export const useSessionStore = defineStore('session', () => {
     finalizeWarning.value = false
     elapsedMs.value = 0
     notes.value = ''
+    pauseReason.value = null
+    shownAtDrop = null
+    reconnectAttempt.value = 0
+    resumeOnOpen.value = false
   }
 
   return {
     currentSessionId, sessionName, segments, polishChunks, glossaryTerms, sourceLang, targetLang,
     bidirectional, speakers, outline,
     recordingStatus, recordingInfo, isRecording, isConnected,
-    isFinalizing, finalizeWarning,
+    isFinalizing, finalizeWarning, isPaused, isLive, pauseReason, reconnectAttempt, resumeOnOpen,
     elapsedMs, elapsedFormatted, notes,
-    prepareSession, loadPreparedSession, updatePreparedSession, startRecording,
-    stopSession, updateGlossary, renameSpeaker, toggleStar, saveNotes, resetSession, _sendAudio,
+    prepareSession, loadPreparedSession, loadPausedSession, updatePreparedSession, startRecording,
+    pauseSession, resumeRecording, stopSession, endPausedSession, setReconnectHandler,
+    updateGlossary, renameSpeaker, toggleStar, saveNotes, resetSession, _sendAudio,
   }
 })

@@ -1,4 +1,6 @@
 # backend/api/sessions.py
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 import json
 import unicodedata
@@ -10,7 +12,7 @@ from pydantic import BaseModel, Field as PydanticField
 
 from backend.storage.database import get_db
 from backend.storage.models import Session as SessionModel, Segment, PolishedChunk, GlossaryTerm, User
-from backend.storage.raw_audio import RAW_AUDIO_DIR
+from backend.storage.raw_audio import RAW_AUDIO_DIR, recording_duration_seconds
 from backend.summary.generator import generate_summary
 from backend.auth import current_user
 from backend.languages import is_valid_pair
@@ -105,6 +107,17 @@ def owned_session(db: DBSession, session_id: str, user: User) -> SessionModel:
     if sess is None or sess.user_id != user.id:
         raise HTTPException(404, "Session not found")
     return sess
+
+
+def _recording_file(sess: SessionModel) -> Path:
+    # Only canonical UUIDs are valid session IDs. Never use arbitrary request or DB
+    # text as a path component, even if a database was manually edited.
+    try:
+        if str(UUID(sess.id)) != sess.id:
+            raise ValueError("non-canonical session ID")
+    except ValueError:
+        raise HTTPException(400, "Invalid session ID") from None
+    return RAW_AUDIO_DIR / f"{sess.id}.pcm"
 
 
 @router.post("", status_code=201)
@@ -306,21 +319,55 @@ def update_session(
     return sess
 
 
+@router.post("/{session_id}/end")
+def end_session(session_id: str, db: DBSession = Depends(get_db), user: User = Depends(current_user)):
+    """End a paused class (or an unrecorded draft) without a WebSocket.
+
+    A recording class is ended from the classroom ({"action": "stop"}), which
+    also saves its last sentence and minute. Duration = recorded audio seconds.
+    """
+    sess = owned_session(db, session_id, user)
+    if sess.recording_state == "ended":
+        return sess   # a repeated click is not an error
+    pcm_path = _recording_file(sess)
+    if sess.recording_state not in {"paused", "created"}:
+        raise HTTPException(409, "Recording is still active; stop it from the classroom")
+    if sess.recording_state == "created" and pcm_path.exists():
+        raise HTTPException(409, "Unfinished recording exists; administrator recovery is required")
+    try:
+        size = pcm_path.stat().st_size if pcm_path.is_file() else 0
+    except OSError:
+        size = 0
+    # Conditional write: a resuming WebSocket claims 'paused' -> 'recording'; exactly one wins.
+    ended = db.execute(
+        update(SessionModel)
+        .where(
+            SessionModel.id == session_id,
+            SessionModel.user_id == user.id,
+            SessionModel.recording_state == sess.recording_state,
+            SessionModel.ended_at.is_(None),
+        )
+        .values(
+            recording_state="ended",
+            ended_at=datetime.now(timezone.utc),
+            duration_seconds=int(recording_duration_seconds(size)),
+        )
+    )
+    if ended.rowcount != 1:
+        db.rollback()
+        raise HTTPException(409, "Recording state changed; retry")
+    db.commit()
+    db.refresh(sess)
+    return sess
+
+
 @router.delete("/{session_id}", status_code=204)
 def delete_session(session_id: str, db: DBSession = Depends(get_db), user: User = Depends(current_user)):
     sess = owned_session(db, session_id, user)
-    # Only canonical UUIDs are valid session IDs. Never use arbitrary request or DB
-    # text as a path component, even if a database was manually edited.
-    try:
-        if str(UUID(sess.id)) != sess.id:
-            raise ValueError("non-canonical session ID")
-    except ValueError:
-        raise HTTPException(400, "Invalid session ID") from None
-
-    pcm_path = RAW_AUDIO_DIR / f"{sess.id}.pcm"
+    pcm_path = _recording_file(sess)
     # Claim the session for deletion with one conditional write. A concurrent
-    # WebSocket can only claim 'created' -> 'recording'; exactly one wins.
-    if sess.recording_state not in {"created", "ended"}:
+    # WebSocket can only claim 'created'/'paused' -> 'recording'; exactly one wins.
+    if sess.recording_state not in {"created", "paused", "ended"}:
         raise HTTPException(409, "Recording is still active or awaiting finalization")
     if sess.recording_state == "created" and pcm_path.exists():
         raise HTTPException(409, "Unfinished recording exists; administrator recovery is required")

@@ -12,10 +12,12 @@ class Session(SQLModel, table=True):
     name: str
     source_lang: str = Field(default="ko")
     target_lang: str = Field(default="zh")
-    recording_state: str = Field(default="created")  # created → recording → ended
+    # created → recording ⇄ paused → ended ("deleting" only inside a delete transaction).
+    # paused = resumable: a pause, a dropped socket or a server restart; ended_at stays NULL.
+    recording_state: str = Field(default="created")
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     ended_at: Optional[datetime] = None
-    duration_seconds: Optional[int] = None
+    duration_seconds: Optional[int] = None   # recorded audio seconds (pauses excluded)
     segment_count: int = 0
     summary: Optional[str] = None
     notes: Optional[str] = None
@@ -24,6 +26,9 @@ class Session(SQLModel, table=True):
     bidirectional: bool = Field(default=True)
     live_outline: Optional[str] = Field(default=None, sa_type=Text)   # running 课堂脉络
     speaker_names: Optional[str] = Field(default=None, sa_type=Text)  # JSON {"0": "教授"}
+    # OnlineSpeakerTracker.export_state() JSON, so a resumed class keeps its speaker
+    # numbers. Internal (centroids, ~15 KB): never sent to clients.
+    speaker_state: Optional[str] = Field(default=None, sa_type=Text, exclude=True)
     segments: List["Segment"] = Relationship(back_populates="session")
 
 

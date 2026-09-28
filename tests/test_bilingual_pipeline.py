@@ -250,7 +250,7 @@ class SpeakerApiAndMigrationTests(unittest.TestCase):
             with patch.object(database.settings, "raw_audio_dir", tmp):
                 database.init_db(old)
             columns = {t: {c["name"] for c in inspect(old).get_columns(t)} for t in ("session", "segment", "polishedchunk")}
-            self.assertTrue({"bidirectional", "live_outline", "speaker_names"} <= columns["session"])
+            self.assertTrue({"bidirectional", "live_outline", "speaker_names", "speaker_state"} <= columns["session"])
             self.assertTrue({"lang", "target_lang", "speaker", "start_ms", "end_ms"} <= columns["segment"])
             self.assertTrue({"start_ms", "end_ms", "summary", "status", "runs_json"} <= columns["polishedchunk"])
             with old.connect() as conn:

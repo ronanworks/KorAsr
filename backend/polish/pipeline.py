@@ -60,6 +60,65 @@ class PolishPipeline:
         self._previous_runs: list[dict] = []
         self._lock = asyncio.Lock()   # the tick loop and finalization never overlap
 
+    # ── resume after a pause ───────────────────────────────────────
+    def restore(self, recorded_ms: int) -> None:
+        """Continue a paused class from what was saved before (blocking DB read).
+
+        A pause drains every window up to the recorded audio length, so the next
+        window starts there. If sentences after the last saved window were never
+        polished (server crash, or a tail window that failed), start at that
+        window's end instead so the next window includes them.
+        """
+        with DBSession(engine) as db:
+            chunks = db.exec(
+                select(PolishedChunk)
+                .where(PolishedChunk.session_id == self.session_id)
+                .order_by(PolishedChunk.chunk_index, PolishedChunk.created_at, PolishedChunk.id)
+            ).all()
+            sess = db.get(SessionModel, self.session_id)
+            outline = (getattr(sess, "live_outline", None) or "") if sess else ""
+            ends = [c.end_ms for c in chunks if c.end_ms is not None]
+            # Chunks saved before windows had times cannot be placed: never re-polish them.
+            polished_through = max(ends) if ends else (None if chunks else 0)
+            first_unpolished = None
+            if polished_through is not None:
+                first_unpolished = db.exec(
+                    select(Segment.timestamp_ms)
+                    .where(Segment.session_id == self.session_id)
+                    .where(Segment.timestamp_ms >= polished_through)
+                    .order_by(Segment.timestamp_ms)
+                    .limit(1)
+                ).first()
+            minutes = [
+                (c.start_ms, c.end_ms, c.summary or "")
+                for c in chunks if c.start_ms is not None and c.end_ms is not None
+            ]
+            last = chunks[-1] if chunks else None
+            chunk_index = max(len(chunks), max((c.chunk_index for c in chunks), default=-1) + 1)
+            previous_summary = (last.summary or "") if last else ""
+            try:
+                previous_runs = json.loads(last.runs_json) if last and last.runs_json else []
+            except (TypeError, ValueError):
+                previous_runs = []
+
+        cursor = max(0, int(recorded_ms))
+        if first_unpolished is not None and first_unpolished < cursor:
+            cursor = polished_through
+        self.cursor_ms = cursor
+        self.chunk_index = chunk_index
+        self.minutes = minutes
+        self.outline = outline
+        self._since_outline = 0
+        self._previous_summary = previous_summary
+        self._previous_runs = (
+            [run for run in previous_runs if isinstance(run, dict)][-2:]
+            if isinstance(previous_runs, list) else []
+        )
+        print(
+            f"[Polish] resumed at {cursor // 1000}s (recorded {int(recorded_ms) // 1000}s) "
+            f"after {len(chunks)} saved window(s)"
+        )
+
     # ── scheduling ─────────────────────────────────────────────────
     def due(self, available_end_ms: int) -> bool:
         return available_end_ms - self.cursor_ms >= WINDOW_MS

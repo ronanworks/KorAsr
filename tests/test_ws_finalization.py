@@ -35,6 +35,7 @@ class _Session:
         self.duration_seconds = None
         self.segment_count = 0
         self.bidirectional = False
+        self.speaker_state = None
 
 
 class _User:
@@ -82,20 +83,27 @@ class _Database:
 
 
 class _Transcriber:
+    """Audio-sample clock like backend.asr.transcriber.Transcriber (no VAD/Whisper)."""
     should_process = True
     last_language = None
+    instances = []
 
     def __init__(self, language="ko"):
         self.language = language
         type(self).last_language = language
+        type(self).instances.append(self)
         self.audio_buffer = np.array([], dtype=np.float32)
+        self._total_samples = 0
+        self.last_commit_span = (0, 0)
 
-    def reset(self, _session_start_ms):
-        pass
+    def reset(self, _session_start_ms=0.0):
+        self.audio_buffer = np.array([], dtype=np.float32)
+        self._total_samples = 0
+        self.last_commit_span = (0, 0)
 
     @property
     def timestamp_ms(self):
-        return 100
+        return (self._total_samples - len(self.audio_buffer)) * 1000 // 16000
 
     @property
     def has_speech(self):
@@ -103,6 +111,7 @@ class _Transcriber:
 
     def push_chunk(self, chunk):
         self.audio_buffer = np.concatenate((self.audio_buffer, chunk))
+        self._total_samples += len(chunk)
         return {
             "should_process": self.should_process,
             "should_interim": False,
@@ -111,12 +120,12 @@ class _Transcriber:
 
     @property
     def total_ms(self):
-        return 1000
-
-    last_commit_span = (1600, 17600)
+        return self._total_samples * 1000 // 16000
 
     def commit(self, was_forced=False):
+        start = self._total_samples - len(self.audio_buffer)
         audio = self.audio_buffer.copy()
+        self.last_commit_span = (start, start + len(audio))
         self.audio_buffer = np.array([], dtype=np.float32)
         return audio
 
@@ -138,7 +147,11 @@ class _Pipeline:
         self.send = send
         self.due_calls = []
         self.finish_calls = []
+        self.restore_calls = []
         type(self).instances.append(self)
+
+    def restore(self, recorded_ms):
+        self.restore_calls.append(recorded_ms)
 
     async def run_due(self, available_end_ms, send_ws=True):
         self.due_calls.append(available_end_ms)
@@ -149,12 +162,25 @@ class _Pipeline:
 
 
 class _Tracker:
+    """Numbers speakers 0, 1, … and round-trips its state like OnlineSpeakerTracker."""
+    instances = []
+
     def __init__(self):
         self.speaker_count = 0
+        self.loaded = None
+        type(self).instances.append(self)
 
     def assign(self, embedding, duration_s, gap_s=None):
-        self.speaker_count = 1
-        return types.SimpleNamespace(speaker=0, similarity=1.0, is_new=True)
+        self.speaker_count = max(self.speaker_count, 1)
+        return types.SimpleNamespace(speaker=self.speaker_count - 1, similarity=1.0, is_new=True)
+
+    def export_state(self):
+        return {"means": [[1.0, 0.0]] * self.speaker_count, "weights": [1.0] * self.speaker_count,
+                "alias": {}, "last": None}
+
+    def load_state(self, state):
+        self.loaded = state
+        self.speaker_count = len(state["means"])
 
 
 class _WebSocketDisconnect(Exception):
@@ -210,7 +236,10 @@ def _load_handler(db, raw_dir):
             "backend.asr.transcriber", Transcriber=_Transcriber,
             transcribe_audio=lambda *_args, **_kwargs: "한국어",
         ),
-        "backend.translation.moonshot": _module("backend.translation.moonshot", translate_stream=None),
+        "backend.translation.moonshot": _module(
+            "backend.translation.moonshot", translate_stream=None,
+            sanitize_translation=lambda _source, translation: translation,
+        ),
         "backend.asr.langid": _module(
             "backend.asr.langid",
             detect_language=lambda _audio, candidates, previous=None: _Decision(candidates[0]),
@@ -248,28 +277,47 @@ def _load_handler(db, raw_dir):
     module._speaker_names = lambda _session_id: {}
     def claim(session_id, user_id):
         session = db.sessions.get(session_id)
-        if not session or session.user_id != user_id or session.recording_state != "created":
-            return False
+        if (not session or session.user_id != user_id or session.ended_at is not None
+                or session.recording_state not in ("created", "paused")):
+            return None
+        previous = session.recording_state
         session.recording_state = "recording"
-        return True
+        return previous
     module._claim_recording = claim
-    module._release_unstarted_claim = lambda session_id, _user_id: setattr(
-        db.sessions[session_id], "recording_state", "created"
+    module._release_unstarted_claim = lambda session_id, _user_id, state="created": setattr(
+        db.sessions[session_id], "recording_state", state
     )
+
+    def load_resume_state(session_id):
+        # Same answer as the real query (tested on SQLite in test_pause_resume.py).
+        rows = [s for s in db.segments.values() if s.session_id == session_id]
+        last = max(rows, key=lambda s: s.sequence, default=None)
+        state = db.sessions[session_id].speaker_state
+        return {
+            "next_sequence": last.sequence + 1 if last else 0,
+            "last_lang": last.lang if last else None,
+            "speaker_state": json.loads(state) if state else None,
+        }
+    module._load_resume_state = load_resume_state
     return module
 
 
-class FinalizationTests(unittest.IsolatedAsyncioTestCase):
+class _HandlerTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db = _Database()
         self.handler = _load_handler(self.db, Path(self.tmp.name))
         self.audio = np.ones(16000, dtype=np.float32).tobytes()
         _Pipeline.instances.clear()
+        _Tracker.instances.clear()
+        _Transcriber.instances.clear()
+        _Transcriber.should_process = True
 
     async def asyncTearDown(self):
         self.tmp.cleanup()
 
+
+class FinalizationTests(_HandlerTestCase):
     async def test_stop_waits_for_pending_translation_and_persists_korean_first(self):
         started = asyncio.Event()
         release = asyncio.Event()
@@ -317,7 +365,9 @@ class FinalizationTests(unittest.IsolatedAsyncioTestCase):
         segment = next(iter(self.db.segments.values()))
         self.assertEqual((segment.ko_text, segment.zh_text), ("한국어", "译文"))
         self.assertEqual(self.db.session.segment_count, 1)
-        self.assertIsNotNone(self.db.session.ended_at)
+        # A dropped socket pauses the class; only an explicit stop ends it.
+        self.assertIsNone(self.db.session.ended_at)
+        self.assertEqual(self.db.session.recording_state, "paused")
 
     async def test_abrupt_disconnect_flushes_uncommitted_tail(self):
         self.handler.Transcriber.should_process = False
@@ -335,7 +385,10 @@ class FinalizationTests(unittest.IsolatedAsyncioTestCase):
         segment = next(iter(self.db.segments.values()))
         self.assertEqual((segment.ko_text, segment.zh_text), ("한국어", "尾句译文"))
         self.assertEqual(ws.sent, [])
-        self.assertIsNotNone(self.db.session.ended_at)
+        self.assertIsNone(self.db.session.ended_at)
+        self.assertEqual(self.db.session.recording_state, "paused")
+        # The tail minute is still polished, silently (nobody is listening).
+        self.assertEqual(_Pipeline.instances[-1].finish_calls, [(1000, False)])
 
     async def test_interrupted_translation_does_not_commit_partial_chinese(self):
         async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context):
@@ -465,7 +518,9 @@ class FinalizationTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(task, 3)
 
         self.assertEqual(ws.close_code, 1008)
-        self.assertIsNotNone(self.db.session.ended_at)
+        # Server-side closes pause too: an administrator can re-enable the account.
+        self.assertIsNone(self.db.session.ended_at)
+        self.assertEqual(self.db.session.recording_state, "paused")
 
     async def test_stop_drains_polish_after_all_finals_are_saved(self):
         async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context):
@@ -480,10 +535,13 @@ class FinalizationTests(unittest.IsolatedAsyncioTestCase):
 
         pipeline = _Pipeline.instances[-1]
         self.assertEqual(pipeline.finish_calls, [(1000, True)])
+        self.assertEqual(pipeline.restore_calls, [])   # a new class starts from zero
         segment = next(iter(self.db.segments.values()))
         self.assertEqual(segment.zh_text, "译文")
         # Audio-clock span from the transcriber commit (samples -> ms).
-        self.assertEqual((segment.start_ms, segment.end_ms, segment.timestamp_ms), (100, 1100, 100))
+        self.assertEqual((segment.start_ms, segment.end_ms, segment.timestamp_ms), (0, 1000, 0))
+        # Duration is recorded audio (1 s of PCM), not wall time.
+        self.assertEqual((self.db.session.recording_state, self.db.session.duration_seconds), ("ended", 1))
 
     async def test_chinese_speech_in_korean_session_is_translated_into_korean(self):
         self.db.session.bidirectional = True
@@ -557,6 +615,213 @@ class FinalizationTests(unittest.IsolatedAsyncioTestCase):
         announcements = [m for m in ws.sent if m.get("status") == "speakers"]
         self.assertEqual(announcements, [{"status": "speakers", "speakers": [{"index": 0, "name": None}]}])
         self.assertEqual(ws.sent[-1]["speaker"], 0)
+
+
+class _Embedder:
+    def embed(self, audio):
+        return np.ones(192, dtype=np.float32)
+
+
+async def _translate_ok(*_args):
+    yield "译文"
+
+
+class PauseResumeTests(_HandlerTestCase):
+    """Pause / abrupt disconnect leave a resumable class; a new socket continues it."""
+
+    @property
+    def pcm(self):
+        return Path(self.tmp.name) / f"{self.db.session.id}.pcm"
+
+    def _pause_before(self, old_audio: bytes, **session_values):
+        self.pcm.write_bytes(old_audio)
+        self.db.session.recording_state = "paused"
+        for name, value in session_values.items():
+            setattr(self.db.session, name, value)
+
+    async def test_pause_saves_the_last_minute_and_keeps_the_class_resumable(self):
+        self.handler.get_embedder = lambda: _Embedder()
+        self.handler.translate_stream = _translate_ok
+        _Transcriber.should_process = False   # the sentence is still open when pause arrives
+        ws = _WebSocket([
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.receive", "text": '{"action":"pause"}'},
+        ])
+        await asyncio.wait_for(self.handler.handle_ws(ws, self.db.session.id), 3)
+
+        session = self.db.session
+        self.assertEqual(session.recording_state, "paused")
+        self.assertIsNone(session.ended_at)
+        self.assertEqual(session.duration_seconds, 1)
+        # Same tail work as stop: the open sentence is recognised, translated and sent…
+        segment = next(iter(self.db.segments.values()))
+        self.assertEqual((segment.ko_text, segment.zh_text, segment.speaker), ("한국어", "译文", 0))
+        self.assertEqual(ws.sent[-1]["status"], "done")
+        # …and the minute before the break is polished, over the socket.
+        self.assertEqual(_Pipeline.instances[-1].finish_calls, [(1000, True)])
+        # Speaker numbers are saved for the resume; then a normal close.
+        self.assertEqual(json.loads(session.speaker_state)["weights"], [1.0])
+        self.assertTrue(ws.closed)
+        self.assertIsNone(ws.close_code)
+        self.assertEqual(self.pcm.read_bytes(), self.audio)
+
+    async def test_dropped_socket_then_reconnect_is_one_continuous_class(self):
+        self.handler.get_embedder = lambda: _Embedder()
+        self.handler.translate_stream = _translate_ok
+        dropped = _WebSocket([
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.disconnect"},
+        ])
+        await asyncio.wait_for(self.handler.handle_ws(dropped, self.db.session.id), 3)
+        session = self.db.session
+        self.assertEqual((session.recording_state, session.ended_at), ("paused", None))
+        saved_speakers = json.loads(session.speaker_state)
+        self.assertEqual(len(saved_speakers["means"]), 1)
+
+        resumed = _WebSocket([
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.receive", "text": '{"action":"stop"}'},
+        ])
+        await asyncio.wait_for(self.handler.handle_ws(resumed, session.id), 3)
+
+        self.assertTrue(resumed.accepted)
+        self.assertEqual(self.pcm.read_bytes(), self.audio * 2)   # appended, never truncated
+        segments = sorted(self.db.segments.values(), key=lambda s: s.sequence)
+        self.assertEqual([s.sequence for s in segments], [0, 1])
+        self.assertEqual([(s.start_ms, s.end_ms) for s in segments], [(0, 1000), (1000, 2000)])
+        self.assertEqual(_Tracker.instances[-1].loaded, saved_speakers)
+        self.assertEqual(segments[1].speaker, 0)   # same speaker number after the break
+        self.assertEqual(resumed.sent[0], {"status": "speakers", "speakers": [{"index": 0, "name": None}]})
+        self.assertEqual(_Pipeline.instances[-1].restore_calls, [1000])
+        self.assertEqual(_Pipeline.instances[-1].finish_calls, [(2000, True)])
+        self.assertEqual(session.recording_state, "ended")
+        self.assertIsNotNone(session.ended_at)
+        self.assertEqual(session.duration_seconds, 2)   # recorded audio; the break is not counted
+
+    async def test_resume_continues_clock_sequence_language_and_polish_from_saved_rows(self):
+        old_audio = np.full(32000, 0.25, dtype=np.float32).tobytes()   # 2 s before the pause
+        self._pause_before(
+            old_audio, bidirectional=True, duration_seconds=2,
+            speaker_state=json.dumps({"means": [[1.0, 0.0], [0.0, 1.0]], "weights": [3.0, 2.0],
+                                      "alias": {}, "last": 1}),
+        )
+        self.db.segments["old"] = _Segment(
+            id="old", session_id=self.db.session.id, sequence=4, timestamp_ms=900, lang="zh",
+            ko_text="老", zh_text="옛", speaker=1, start_ms=900, end_ms=1800,
+        )
+        previous_languages = []
+
+        def detect(_audio, candidates, previous=None):
+            previous_languages.append(previous)
+            return _Decision("ko")
+
+        self.handler.detect_language = detect
+        self.handler.get_embedder = lambda: _Embedder()
+        self.handler.translate_stream = _translate_ok
+        ws = _WebSocket([
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.receive", "text": '{"action":"stop"}'},
+        ])
+        await asyncio.wait_for(self.handler.handle_ws(ws, self.db.session.id), 3)
+
+        self.assertEqual(self.pcm.read_bytes(), old_audio + self.audio)
+        new = next(s for s in self.db.segments.values() if s.id != "old")
+        self.assertEqual(new.sequence, 5)
+        self.assertEqual((new.timestamp_ms, new.start_ms, new.end_ms), (2000, 2000, 3000))
+        self.assertEqual(previous_languages[0], "zh")   # language hint from the last saved sentence
+        self.assertEqual(_Pipeline.instances[-1].restore_calls, [2000])
+        self.assertEqual(_Tracker.instances[-1].loaded["weights"], [3.0, 2.0])
+        self.assertEqual(ws.sent[0]["speakers"], [{"index": 0, "name": None}, {"index": 1, "name": None}])
+        self.assertEqual((self.db.session.recording_state, self.db.session.duration_seconds), ("ended", 3))
+
+    async def test_partial_last_sample_is_completed_so_new_audio_stays_aligned(self):
+        self._pause_before(b"\x01" * 6)   # a crash cut the second float32 short
+        _Transcriber.should_process = False
+        self.handler.translate_stream = _translate_ok
+        ws = _WebSocket([
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.receive", "text": '{"action":"pause"}'},
+        ])
+        await asyncio.wait_for(self.handler.handle_ws(ws, self.db.session.id), 3)
+        self.assertEqual(self.pcm.read_bytes(), b"\x01" * 6 + b"\0\0" + self.audio)
+        self.assertEqual(_Transcriber.instances[-1].total_ms, 1000)   # 16002 samples
+
+    async def test_reconnect_waits_for_the_dropped_socket_to_save_its_tail(self):
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_translate(*_args):
+            started.set()
+            await release.wait()
+            yield "尾句"
+
+        self.handler.translate_stream = slow_translate
+        session_id = self.db.session.id
+        first = asyncio.create_task(self.handler.handle_ws(_WebSocket([
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.disconnect"},
+        ]), session_id))
+        await asyncio.wait_for(started.wait(), 3)
+        for _ in range(300):   # the dropped socket is now saving its tail
+            connection = self.handler._connections.get(session_id)
+            if connection is not None and connection.closing:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(self.db.session.recording_state, "recording")
+
+        reconnect = _HoldingWebSocket([])
+        second = asyncio.create_task(self.handler.handle_ws(reconnect, session_id))
+        try:
+            await asyncio.sleep(0.05)
+            self.assertFalse(reconnect.accepted)   # waiting, not refused
+            self.assertIsNone(reconnect.close_code)
+            release.set()
+            await asyncio.wait_for(first, 3)
+            await asyncio.wait_for(reconnect.waiting.wait(), 3)
+            self.assertTrue(reconnect.accepted)
+            self.assertEqual(_Pipeline.instances[-1].restore_calls, [1000])
+        finally:
+            release.set()
+            reconnect.release.set()
+            await asyncio.wait_for(second, 3)
+        self.assertEqual(self.db.session.recording_state, "ended")
+        self.assertEqual(self.db.segments[next(iter(self.db.segments))].zh_text, "尾句")
+
+    async def test_failed_accept_returns_a_new_class_to_its_draft(self):
+        class GoneBeforeAccept(_WebSocket):
+            async def accept(self):
+                raise RuntimeError("client went away")
+
+        with self.assertRaises(RuntimeError):
+            await self.handler.handle_ws(GoneBeforeAccept([]), self.db.session.id)
+        self.assertEqual(self.db.session.recording_state, "created")
+        self.assertFalse(self.pcm.exists())   # the empty file it created is gone; start can be retried
+
+    async def test_failed_resume_keeps_the_class_paused_and_its_recording_intact(self):
+        self._pause_before(self.audio)
+        with patch.object(_Pipeline, "restore", side_effect=RuntimeError("database locked")):
+            ws = _WebSocket([])
+            await asyncio.wait_for(self.handler.handle_ws(ws, self.db.session.id), 3)
+        self.assertFalse(ws.accepted)
+        self.assertEqual(ws.close_code, 1011)
+        self.assertEqual(self.db.session.recording_state, "paused")
+        self.assertEqual(self.pcm.read_bytes(), self.audio)
+
+        class GoneBeforeAccept(_WebSocket):
+            async def accept(self):
+                raise RuntimeError("client went away")
+
+        with self.assertRaises(RuntimeError):
+            await self.handler.handle_ws(GoneBeforeAccept([]), self.db.session.id)
+        self.assertEqual(self.db.session.recording_state, "paused")
+        self.assertEqual(self.pcm.read_bytes(), self.audio)
+
+    async def test_ended_class_cannot_be_resumed(self):
+        self._pause_before(self.audio, ended_at=datetime.now(timezone.utc), recording_state="ended")
+        ws = _WebSocket([])
+        await self.handler.handle_ws(ws, self.db.session.id)
+        self.assertEqual(ws.close_code, 4009)
+        self.assertFalse(ws.accepted)
+        self.assertEqual(self.pcm.read_bytes(), self.audio)
 
 
 if __name__ == "__main__":

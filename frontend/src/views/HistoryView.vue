@@ -14,8 +14,11 @@
         v-for="sess in filteredSessions"
         :key="sess.id"
         :session="sess"
+        :busy="actionBusy"
         @select="loadSession"
         @delete="deleteSession"
+        @resume="resumeSession"
+        @end="endSession"
       />
       <div v-if="filteredSessions.length === 0" class="empty">没有符合条件的课堂记录。</div>
     </div>
@@ -33,6 +36,16 @@
 
       <div class="detail-body">
         <div class="segments">
+          <section v-if="selectedSession.session.recording_state === 'paused'" class="paused-card" aria-label="已暂停的课堂">
+            <div>
+              <strong>这节课已暂停</strong>
+              <p>已录 {{ formatTs((selectedSession.session.duration_seconds || 0) * 1000) }}。继续上课会接着录同一节课，字幕、精修和说话人编号都会延续。</p>
+            </div>
+            <div class="paused-actions">
+              <button class="button button-primary" type="button" :disabled="actionBusy" @click="resumeSession(selectedSession.session.id)">继续上课</button>
+              <button class="button button-secondary" type="button" :disabled="actionBusy" @click="endSession(selectedSession.session.id)">结束课堂</button>
+            </div>
+          </section>
           <section class="recording-card" aria-label="课堂录音">
             <div><strong>完整课堂录音</strong><p>{{ recordingStatusText }}</p></div>
             <div v-if="recording?.available && !recording.recording" class="recording-actions">
@@ -85,6 +98,7 @@
 
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import axios from 'axios'
 import SessionHistory from '../components/SessionHistory.vue'
 import MaterialsPanel from '../components/MaterialsPanel.vue'
@@ -98,6 +112,7 @@ import { normalizeOutline, normalizePolishChunk } from '../utils/polish.js'
 import { normalizeSpeakerName, speakersFromList } from '../utils/speakers.js'
 
 const liveStore = useSessionStore()
+const router = useRouter()
 const sessions = ref([])
 const search = ref('')
 const selectedSession = ref(null)
@@ -105,6 +120,7 @@ const summaryLoading = ref(false)
 const recording = ref(null)
 const recordingState = ref('idle')
 const renameError = ref('')
+const actionBusy = ref(false)
 let detailLoadSeq = 0
 function returnToList() {
   detailLoadSeq += 1
@@ -179,8 +195,46 @@ async function deleteSession(id) {
   try {
     await axios.delete(`/api/sessions/${id}`)
     sessions.value = sessions.value.filter(s => s.id !== id)
+    if (selectedSession.value?.session?.id === id) returnToList()
+    forgetLiveClass(id)
   } catch (e) {
-    alert(e.response?.data?.detail || '删除失败，请稍后重试。')
+    alert(e.response?.status === 409 ? '这节课正在录音，请先暂停或结束。' : e.response?.data?.detail || '删除失败，请稍后重试。')
+  }
+}
+
+// The classroom still shows this paused class; it no longer exists as one.
+function forgetLiveClass(id) {
+  if (liveStore.currentSessionId === id && !liveStore.isLive && !liveStore.isFinalizing) liveStore.resetSession()
+}
+
+// 继续上课: load the saved class into the classroom, which resumes recording on open.
+async function resumeSession(id) {
+  if (actionBusy.value) return
+  actionBusy.value = true
+  try {
+    await liveStore.loadPausedSession(id)
+    liveStore.resumeOnOpen = true
+    await router.push('/')
+  } catch (e) {
+    alert(e.response?.data?.detail || e.message || '无法继续这节课，请稍后重试。')
+  } finally {
+    actionBusy.value = false
+  }
+}
+
+async function endSession(id) {
+  if (actionBusy.value) return
+  if (!confirm('结束后这节课不能再继续录音。确定结束？')) return
+  actionBusy.value = true
+  try {
+    const { data } = await axios.post(`/api/sessions/${id}/end`)
+    sessions.value = sessions.value.map(s => (s.id === id ? { ...s, ...data } : s))
+    forgetLiveClass(id)
+    if (selectedSession.value?.session?.id === id) await loadSession(id)
+  } catch (e) {
+    alert(e.response?.status === 409 ? '这节课正在录音或仍在保存，请稍后再试。' : e.response?.data?.detail || '结束失败，请稍后重试。')
+  } finally {
+    actionBusy.value = false
   }
 }
 
@@ -251,6 +305,10 @@ function formatTs(ms) {
 .btn-summary:disabled { opacity: 0.5; cursor: not-allowed; }
 .detail-body { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 .segments { flex: 1; overflow-y: auto; padding: clamp(1rem,3vw,2rem); display: flex; flex-direction: column; gap: .75rem; }
+.paused-card { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem 1.2rem; border-radius: 16px; border: 1px solid #efd9ad; background: #fff8e9; }
+.paused-card strong { color: #6f4a0c; }
+.paused-card p { color: #6f5a3a; font-size: .85rem; margin: .2rem 0 0; line-height: 1.5; }
+.paused-actions { display: flex; flex-wrap: wrap; gap: .4rem; flex: none; }
 .recording-card { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem 1.2rem; border-radius: 16px; border: 1px solid var(--border); background: #fff; }
 .recording-card p { color: var(--text-muted); font-size: .85rem; margin: .2rem 0 0; }
 .history-materials { padding: 1rem 1.2rem; border: 1px solid var(--border); border-radius: 16px; background: #fff; }
@@ -281,6 +339,8 @@ function formatTs(ms) {
   .detail-body { height: auto; flex-direction: column; overflow-y: auto; }
   .segments { overflow: visible; }
   .summary-panel { width: auto; border-left: 0; border-top: 1px solid #f0f0f0; }
-  .recording-card { flex-wrap: wrap; }
+  .recording-card,.paused-card { flex-wrap: wrap; }
+  .paused-actions { flex: 1 1 100%; }
+  .paused-actions .button { flex: 1; }
 }
 </style>
