@@ -61,7 +61,7 @@ def main():
     import numpy as np
     from backend.asr.langid import detect_language
     from backend.asr.model import get_model
-    from backend.asr.transcriber import Transcriber, transcribe_audio
+    from backend.asr.transcriber import Transcriber, strip_repeated_boundary, transcribe_audio
     from backend.languages import candidate_languages, translation_target
     from backend.polish.pipeline import MAX_WINDOW_MS, WINDOW_MS
     from backend.polish.translator import build_runs, choose_run_text, polish_runs, transcribe_long_form
@@ -82,8 +82,9 @@ def main():
     segments, dropped = [], Counter()
     last_lang, last_end = (args.source if len(candidates) == 1 else None), None
     t_asr = t_spk = 0.0
+    last_text: dict[str, str] = {}   # same boundary de-duplication as the live handler
 
-    def finalize(chunk_audio, span):
+    def finalize(chunk_audio, span, continuation=False):
         nonlocal last_lang, last_end, t_asr, t_spk
         start_ms, end_ms = span[0] * 1000 // 16000, span[1] * 1000 // 16000
         t0 = time.perf_counter()
@@ -94,6 +95,10 @@ def main():
             return
         text = transcribe_audio(chunk_audio, initial_prompt=None, language=decision.language)
         t_asr += time.perf_counter() - t0
+        if text and continuation and last_text.get(decision.language):
+            text = strip_repeated_boundary(last_text[decision.language], text, decision.language)
+        if text:
+            last_text[decision.language] = text
         if not text:
             dropped["asr_filtered_or_empty"] += 1
             return
@@ -117,14 +122,16 @@ def main():
     quiet_print = builtins.print
     builtins.print = lambda *a, **k: None if a and str(a[0]).startswith(("[ASR", "[LangID")) else quiet_print(*a, **k)
     t_start = time.perf_counter()
+    last_forced = False
     for offset in range(0, len(audio), 4096):
         result = transcriber.push_chunk(audio[offset: offset + 4096])
         if result["should_process"]:
             chunk_audio = transcriber.commit(was_forced=result["is_forced"])
-            finalize(chunk_audio, transcriber.last_commit_span)
+            finalize(chunk_audio, transcriber.last_commit_span, continuation=last_forced)
+            last_forced = result["is_forced"]
     if transcriber.has_speech and len(transcriber.audio_buffer) >= 8000:
         chunk_audio = transcriber.commit(was_forced=False)
-        finalize(chunk_audio, transcriber.last_commit_span)
+        finalize(chunk_audio, transcriber.last_commit_span, continuation=last_forced)
     realtime_s = time.perf_counter() - t_start
 
     # Per-minute windows (same boundaries as PolishPipeline, all sentences known).
