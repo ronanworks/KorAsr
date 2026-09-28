@@ -13,6 +13,10 @@ from unittest.mock import patch
 
 import numpy as np
 
+import os
+os.environ.setdefault("MOONSHOT_API_KEY", "test-key")
+from backend.asr.transcriber import strip_repeated_boundary  # pure text helper, used for real
+
 
 HANDLER_PATH = Path(__file__).resolve().parents[1] / "backend" / "ws" / "handler.py"
 
@@ -83,6 +87,7 @@ class _Database:
 
 
 class _Transcriber:
+    forced = []   # per push_chunk: was this commit a forced (max-length) cut?
     """Audio-sample clock like backend.asr.transcriber.Transcriber (no VAD/Whisper)."""
     should_process = True
     last_language = None
@@ -112,10 +117,11 @@ class _Transcriber:
     def push_chunk(self, chunk):
         self.audio_buffer = np.concatenate((self.audio_buffer, chunk))
         self._total_samples += len(chunk)
+        forced = type(self).forced.pop(0) if type(self).forced else False
         return {
             "should_process": self.should_process,
             "should_interim": False,
-            "is_forced": False,
+            "is_forced": forced,
         }
 
     @property
@@ -235,6 +241,7 @@ def _load_handler(db, raw_dir):
         "backend.asr.transcriber": _module(
             "backend.asr.transcriber", Transcriber=_Transcriber,
             transcribe_audio=lambda *_args, **_kwargs: "한국어",
+            strip_repeated_boundary=strip_repeated_boundary,
         ),
         "backend.translation.moonshot": _module(
             "backend.translation.moonshot", translate_stream=None,
@@ -312,6 +319,7 @@ class _HandlerTestCase(unittest.IsolatedAsyncioTestCase):
         _Tracker.instances.clear()
         _Transcriber.instances.clear()
         _Transcriber.should_process = True
+        _Transcriber.forced = []
 
     async def asyncTearDown(self):
         self.tmp.cleanup()
@@ -822,6 +830,26 @@ class PauseResumeTests(_HandlerTestCase):
         self.assertEqual(ws.close_code, 4009)
         self.assertFalse(ws.accepted)
         self.assertEqual(self.pcm.read_bytes(), self.audio)
+
+
+    async def test_word_repeated_across_a_forced_cut_is_dropped(self):
+        texts = iter(["이야기 정말 하고 싶었어요.", "싶었어요. 아 그랬어요?"])
+
+        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context):
+            yield "译文"
+
+        self.handler.transcribe_audio = lambda *_args, **_kwargs: next(texts)
+        self.handler.translate_stream = translate
+        self.handler.Transcriber.forced = [True, False]   # 1st clip hit the 6 s cap
+        ws = _WebSocket([
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.receive", "text": '{"action":"stop"}'},
+        ])
+        await asyncio.wait_for(self.handler.handle_ws(ws, self.db.session.id), 3)
+
+        texts_saved = [seg.ko_text for seg in sorted(self.db.segments.values(), key=lambda seg: seg.sequence)]
+        self.assertEqual(texts_saved, ["이야기 정말 하고 싶었어요.", "아 그랬어요?"])
 
 
 if __name__ == "__main__":

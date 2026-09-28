@@ -23,6 +23,7 @@ from backend.translation.moonshot import get_client, completion_options
 from backend.config import settings
 from backend.asr.model import get_mlx_repo
 from backend.asr.transcriber import looks_degenerate
+from backend.asr.zh_text import clean_zh
 from backend.languages import ASR_LANGUAGES, LANGUAGE_LABELS
 
 
@@ -162,6 +163,7 @@ def transcribe_long_form(audio: np.ndarray, language: str = "ko") -> str:
             seg["text"] for seg in result.get("segments", [])
             if not looks_degenerate(seg.get("text", ""))
         ).strip()
+        text = clean_zh(text) if language == "zh" else text
         return text if is_plausible_polish_transcript(text, language, prompt) else ""
     from backend.asr.model import get_model
     model = get_model()
@@ -179,6 +181,7 @@ def transcribe_long_form(audio: np.ndarray, language: str = "ko") -> str:
         vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 200},
     )
     text = "".join(seg.text for seg in segments if _keep_whisper_segment(seg)).strip()
+    text = clean_zh(text) if language == "zh" else text   # Whisper sometimes writes Traditional
     return text if is_plausible_polish_transcript(text, language, prompt) else ""
 
 

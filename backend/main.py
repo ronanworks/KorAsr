@@ -33,6 +33,8 @@ async def lifespan(app: FastAPI):
     # Load the voiceprint model now rather than on the first classroom connection.
     from backend.speaker.embedding import get_embedder
     get_embedder()
+    from backend.asr.sensevoice import get_recognizer
+    get_recognizer()
     print("[Startup] Ready")
     yield
     print("[Shutdown] Server stopping")

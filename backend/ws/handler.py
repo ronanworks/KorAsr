@@ -12,7 +12,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from sqlmodel import Session as DBSession, select
 from sqlalchemy import update
 
-from backend.asr.transcriber import Transcriber, transcribe_audio
+from backend.asr.transcriber import Transcriber, strip_repeated_boundary, transcribe_audio
 from backend.asr.langid import detect_language
 from backend.languages import candidate_languages, translation_target
 from backend.translation.moonshot import sanitize_translation, translate_stream
@@ -379,6 +379,9 @@ async def handle_ws(websocket: WebSocket, session_id: str):
         last_lang = resume["last_lang"] if resume and resume["last_lang"] in candidates else None
     # A pause is a real gap: no speaker continuity across it.
     last_speaker_end_ms: int | None = None
+    # Boundary de-duplication after a forced cut: the last final text per language.
+    last_final_text: dict[str, str] = {}
+    last_commit_forced = False
     announced_speakers = speaker_tracker.speaker_count
     speaker_lock = asyncio.Lock()
 
@@ -468,7 +471,7 @@ async def handle_ws(websocket: WebSocket, session_id: str):
         return assignment.speaker
 
     # ── 单段 final segment 处理（语言识别 → 识别 → 说话人 → 存原文 → 翻译 → 更新 DB → 推 WS）
-    async def _process_final(audio, seg_id, span, s_id, seq_num, context, send_ws=True):
+    async def _process_final(audio, seg_id, span, s_id, seq_num, context, send_ws=True, continuation=False):
         nonlocal rolling_context, last_lang
         start_ms, end_ms = span
 
@@ -482,6 +485,15 @@ async def handle_ws(websocket: WebSocket, session_id: str):
         # so next sentence can start transcribing concurrently.
         async with _gpu_sem:
             lang, ko = await asyncio.to_thread(_recognize, audio, False, last_lang)
+        # No await between the semaphore release and this update: the next
+        # sentence (queued on the FIFO semaphore) always sees this text.
+        if ko and continuation and last_final_text.get(lang):
+            deduped = strip_repeated_boundary(last_final_text[lang], ko, lang)
+            if deduped != ko:
+                print(f"[WS final ] seg={seg_id[:8]} dropped {len(ko) - len(deduped)} chars repeated across the cut")
+            ko = deduped
+        if ko:
+            last_final_text[lang] = ko
 
         if not ko:
             print(f"[WS final ] seg={seg_id[:8]} EMPTY -> removing card")
@@ -580,10 +592,10 @@ async def handle_ws(websocket: WebSocket, session_id: str):
                 **meta,
             })
 
-    def _schedule_final(audio, seg_id, span, seq_num, context, send_ws=True):
+    def _schedule_final(audio, seg_id, span, seq_num, context, send_ws=True, continuation=False):
         inflight_starts[seg_id] = span[0]
         task = asyncio.create_task(
-            _process_final(audio, seg_id, span, session_id, seq_num, context, send_ws)
+            _process_final(audio, seg_id, span, session_id, seq_num, context, send_ws, continuation)
         )
         final_tasks.add(task)
 
@@ -612,7 +624,7 @@ async def handle_ws(websocket: WebSocket, session_id: str):
 
     # stop、pause 与意外断开都提交尚未切段的尾音。
     def _flush_tail(send_ws):
-        nonlocal current_seg_id, segment_counter
+        nonlocal current_seg_id, segment_counter, last_commit_forced
 
         if transcriber.has_speech and len(transcriber.audio_buffer) >= GRACEFUL_FINAL_MIN_SAMPLES:
             seg_id = current_seg_id or str(uuid4())
@@ -620,9 +632,11 @@ async def handle_ws(websocket: WebSocket, session_id: str):
             seq = segment_counter
             segment_counter += 1
             # was_forced=False：把整个 buffer 吐出来，不留尾巴
+            continuation = last_commit_forced
             final_audio = transcriber.commit(was_forced=False)
+            last_commit_forced = False
             ctx = rolling_context
-            _schedule_final(final_audio, seg_id, _commit_span(), seq, ctx, send_ws)
+            _schedule_final(final_audio, seg_id, _commit_span(), seq, ctx, send_ws, continuation)
         else:
             print("[WS] no verified speech in tail, skip final ASR")
 
@@ -740,11 +754,13 @@ async def handle_ws(websocket: WebSocket, session_id: str):
                     seq = segment_counter
                     segment_counter += 1
                     # commit 自带智能切点：撞缓冲上限时在最后 1 秒里找能量谷底切。
+                    continuation = last_commit_forced   # this clip starts inside the previous one's overlap
                     final_audio = transcriber.commit(was_forced=result["is_forced"])
+                    last_commit_forced = result["is_forced"]
                     last_interim_time = time.time()
                     ctx = rolling_context   # snapshot for this segment's inference
 
-                    _schedule_final(final_audio, final_id, _commit_span(), seq, ctx)
+                    _schedule_final(final_audio, final_id, _commit_span(), seq, ctx, continuation=continuation)
 
             elif message.get("text"):
                 # 控制消息：{"action": "stop"} 结束课堂；{"action": "pause"} 暂停（可继续）

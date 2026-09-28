@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     asr_repetition_penalty: float = 1.1            # penalise repeated tokens at decoder level
     polish_condition_on_previous_text: bool = False  # avoid long-form Whisper repetition loops
     polish_reasr: bool = True   # re-recognise each speaker run with more context before the minute polish
+    # Mandarin clips: "sensevoice" (sherpa-onnx, CPU; fewer errors than Whisper in the
+    # 09-29 comparison) or "whisper". Korean always uses Whisper.
+    asr_zh_engine: str = "sensevoice"
+    sensevoice_model_dir: str = "models/asr/sensevoice-2024-07-17"
+    sensevoice_threads: int = 4
 
     vad_threshold: float = 0.5
     vad_min_silence_ms: int = 600                  # down from 1000 — faster sentence boundary detection
@@ -77,6 +82,18 @@ class Settings(BaseSettings):
     speaker_min_new_s: float = 2.0          # 新建说话人所需的语音秒数（去掉首尾静音后）
     speaker_max_speakers: int = 8
     # --- end speaker diarization ---
+
+    # --- diarization ---
+    # 每分钟精修窗口的轮次级说话人分离（backend/speaker/diarize.py）：pyannote segmentation-3.0 ONNX
+    # + 上面的 CAM++ 声纹 + 聚类，纯 CPU。模型缺失/加载失败时自动关闭（精修沿用实时句子标签）。
+    # 模型下载：python scripts/download_diarization_model.py。阈值依据：scripts/eval_diarize.py。
+    diarization_enabled: bool = True
+    diarization_segmentation_model_path: str = "models/speaker/sherpa-onnx-pyannote-segmentation-3-0.onnx"
+    diarization_threads: int = 2
+    diarization_step_s: float = 2.5             # 10 s 分割块的滑动步长
+    diarization_cluster_threshold: float = 0.5  # 窗口内平均链接聚类：余弦 ≥ 此值合并
+    diarization_match_threshold: float = 0.5    # 窗口簇 ↔ 全局说话人质心：余弦 ≥ 此值视为同一人
+    # --- end diarization ---
 
     # extra="ignore" so env keys consumed elsewhere (RAW_AUDIO_DIR / HF_HOME /
     # EXTRA_CERT_SANS — read via os.environ in handler/start) don't trip pydantic.

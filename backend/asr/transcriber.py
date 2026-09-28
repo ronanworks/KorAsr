@@ -8,6 +8,8 @@ from backend.asr.model import get_model, get_mlx_repo
 from backend.asr.vad import SileroVAD
 from backend.config import settings
 from backend.languages import ASR_LANGUAGES
+from backend.asr import sensevoice
+from backend.asr.zh_text import clean_zh
 
 SAMPLE_RATE = 16000
 OVERLAP_SAMPLES = int(SAMPLE_RATE * 0.4)  # 400ms 重叠窗口，防止切词
@@ -39,6 +41,8 @@ ZH_HALLUCINATION_BLACKLIST = (
     "字幕", "Amara", "点赞", "點贊", "订阅", "訂閱", "打赏", "明镜", "明鏡",
     "感谢观看", "感謝觀看", "谢谢观看", "謝謝觀看", "谢谢收看", "謝謝收看",
     "下期再见", "下期再見", "下次见", "下次見", "优优独播", "YoYo",
+    # 09-29 评估：课堂 85:47 的 1.1 s 片段被识别成"谢谢大家的观看"并通过了旧过滤器
+    "谢谢大家的观看", "感谢大家的观看", "谢谢您的观看", "感谢您的观看", "谢谢大家收看",
     # 09-28 离线测试：给中文加 "以下是普通话的句子。" 提示词后，真实语音被替换成
     # "请不吝点赞 订阅 转发 打赏支持明镜与点点栏目"，所以 zh 默认不加提示词。
 )
@@ -106,6 +110,32 @@ def looks_degenerate(text: str) -> bool:
     encoded = text.encode("utf-8")
     # Whisper's own loop signal; zlib overhead makes short strings look incompressible.
     return len(compact) >= 24 and len(encoded) / max(1, len(zlib.compress(encoded))) > 2.4
+
+
+_BOUNDARY_PUNCT = " ,.!?;:，。！？、；：…"
+
+
+def strip_repeated_boundary(previous: str, current: str, language: str) -> str:
+    """Drop the head of `current` that repeats the tail of `previous`.
+
+    After a forced 6 s cut the next clip starts with a 400 ms overlap, so the
+    boundary word is often transcribed twice (09-28: "하고 싶었어요.｜싶었어요. 아 그랬어요?",
+    "입고｜입고 커플인 거"). Only call this for such continuations. Comparison ignores
+    spaces/punctuation and needs at least 2 characters (a single repeated Chinese
+    character, "广｜广布", is as likely a misheard word as an overlap). Korean is only
+    cut at a word boundary, so "남자친구｜남자친구가" keeps its particle.
+    """
+    prev = [char for char in previous if char.isalnum()]
+    positions = [i for i, char in enumerate(current) if char.isalnum()]
+    for n in range(min(8, len(prev), len(positions) - 1), 1, -1):
+        if prev[-n:] != [current[i] for i in positions[:n]]:
+            continue
+        end = positions[n - 1] + 1
+        if language != "zh" and end < len(current) and current[end].isalnum():
+            continue   # the match ends inside a Korean/English word
+        rest = current[end:].lstrip(_BOUNDARY_PUNCT)
+        return rest or current
+    return current
 
 
 def _is_low_energy_common_hallucination(text: str, rms: float) -> bool:
@@ -183,10 +213,17 @@ def _run_inference_mlx(audio: np.ndarray, prompt: str, beam_size: int, language:
 
 
 def _run_inference(audio: np.ndarray, prompt: str, beam_size: int, language: str) -> str:
-    """根据 settings.asr_backend 分发到对应后端。"""
+    """根据语言和 settings.asr_backend 分发：普通话优先 SenseVoice，其余走 Whisper。"""
+    if language == "zh":
+        text = sensevoice.transcribe(audio)
+        # Empty on a clip of 1 s or more: let Whisper have a try before dropping it.
+        if text is not None and (text or len(audio) < SAMPLE_RATE):
+            return clean_zh(text)
     if settings.asr_backend == "mlx":
-        return _run_inference_mlx(audio, prompt, beam_size, language)
-    return _run_inference_faster_whisper(audio, prompt, beam_size, language)
+        text = _run_inference_mlx(audio, prompt, beam_size, language)
+    else:
+        text = _run_inference_faster_whisper(audio, prompt, beam_size, language)
+    return clean_zh(text) if language == "zh" else text
 
 
 def transcribe_audio(
