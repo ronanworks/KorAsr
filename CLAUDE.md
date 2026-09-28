@@ -4,76 +4,51 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-korAsr is a real-time Korean ASR (Automatic Speech Recognition) system. A Python FastAPI backend receives audio via WebSocket, runs GPU-accelerated speech recognition, optionally translates Korean→Chinese via the Moonshot API, and streams results back to an HTML/JS frontend.
+korAsr is a real-time classroom interpretation service for a Chinese student at a Korean university. The browser streams 16 kHz float32 PCM over a WebSocket; the FastAPI backend runs GPU speech recognition (faster-whisper large-v3 on an RTX 4090), translates each sentence with Kimi (Moonshot API), and every ~60 s produces a polished translation plus key points for that minute. Sessions, transcripts, recordings and course materials are stored locally (SQLite + raw PCM files) per user account.
 
-## Running the Servers
-
-```bash
-# Primary server (Whisper Large-v3 + Moonshot translation)
-python whisperServerTransVer.py
-# UI: http://localhost:8000 → serves indexTrans.html
-
-# Alternative server (FunASR SenseVoiceSmall, transcription only)
-python server.py
-# UI: http://localhost:8000 → serves index.html
-```
-
-No build step required. There are no automated tests.
-
-## Installing Dependencies
+## Running
 
 ```bash
-pip install -r requirements.txt
-
-# PyTorch with CUDA (if not already installed)
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+python start.py                          # HTTPS on :8000; rebuilds frontend/dist when sources are newer
+python start.py --host 127.0.0.1         # behind Tailscale Serve
+python -m backend.admin create-user --username admin --admin   # first account (prompts for password)
+python scripts/download_speaker_model.py # once: CAM++ voiceprint model for speaker labels
 ```
+
+Windows service helpers: `service-start.bat` / `service-stop.bat` / `service-status.bat`.
+The legacy single-file servers in `legacy/` are archived; do not run them.
+
+## Tests
+
+```bash
+MOONSHOT_API_KEY=test-key python -m unittest discover -s tests -p "test_*.py"   # backend (unittest, no pytest)
+cd frontend && node --test tests/*.test.mjs && npm run build                    # frontend
+python scripts/replay_session.py data/raw/<session>.pcm --minutes 20            # offline replay of a real recording, no LLM calls
+```
+
+All LLM calls in tests are mocked. Never run a replay with `--llm` (paid API) without the user's OK.
 
 ## Architecture
 
-### Audio pipeline (`whisperServerTransVer.py`)
-
 ```
-Browser mic → WebSocket (16kHz float32 PCM chunks)
-  → Server-side ring buffer with VAD (silence detection)
-  → Faster-Whisper Large-v3 (CUDA float16) inference
-  → Moonshot API (Korean→Chinese translation, async)
-  → WebSocket JSON response {status, text, translation, id}
+Browser mic (AudioWorklet, 4096-sample blocks) ──WS /ws/{session_id}──▶ backend/ws/handler.py
+  ├─ raw PCM appended to RAW_AUDIO_DIR/<session>.pcm (archive + polish source)
+  ├─ Transcriber (backend/asr/transcriber.py): Silero VAD cuts ≤6 s, audio-sample clock for timestamps
+  ├─ per final sentence: language ID among the session's two languages (backend/asr/langid.py)
+  │    → Whisper → hallucination filters → speaker voiceprint + online clustering (backend/speaker/)
+  │    → Segment row (spoken lang, target lang, speaker, start/end ms) → Kimi streaming translation
+  └─ PolishPipeline (backend/polish/pipeline.py), every ~60 s of settled audio:
+       sentences grouped into speaker/language runs → VAD re-recognition cross-checked with live text
+       → one LLM call: per-run translation + 本分钟要点 → PolishedChunk; outline every 5 windows
 ```
 
-VAD logic buffers audio until a silence gap (≥3 consecutive chunks below `SILENCE_THRESHOLD=0.012`) or the 6-second max is hit, then triggers inference. Interim results are streamed every 0.4 s while the user is still speaking.
-
-### Key constants (all at the top of `whisperServerTransVer.py`)
-
-| Constant | Default | Purpose |
-|---|---|---|
-| `MOONSHOT_API_KEY` | hardcoded string | Moonshot API auth — move to env var |
-| `MAX_BUFFER_S` | 6.0 | Force-process after this many seconds |
-| `MIN_BUFFER_S` | 0.5 | Ignore chunks shorter than this |
-| `SILENCE_THRESHOLD` | 0.012 | RMS below this = silence |
-| `SILENCE_CHUNKS` | 3 | Consecutive silence chunks before processing |
-| `INTERIM_INTERVAL` | 0.4 | Seconds between interim transcription pushes |
-| `HALLUCINATION_BLACKLIST` | list of strings | Whisper hallucinations to suppress |
-
-### Frontend state machine (`indexTrans.html`)
-
-Each spoken segment gets a numeric `id`. The UI tracks three states per segment:
-- `interim` — still recording, Whisper result shown
-- `translating` — VAD triggered, waiting for Moonshot response
-- `done` — final Korean + Chinese both displayed
-
-### Server variants
-
-| File | ASR Engine | Translation |
-|---|---|---|
-| `whisperServerTransVer.py` | Faster-Whisper Large-v3 (CUDA fp16) | Moonshot API |
-| `server.py` | FunASR SenseVoiceSmall | None |
-| `whisperSever.py` | Whisper Large-v3-Turbo (PyTorch) | None |
-
-The "copy" and "copy 2" files are backup snapshots and are not active.
+- Bidirectional sessions (default): speech in the target language is translated back into the source language (e.g. Chinese → Korean in a Korean→Chinese class). Legacy column names `ko_text` / `zh_text` mean "spoken text" / "translation".
+- One module-level GPU semaphore serializes all Whisper work across sessions; interim previews skip when it is busy.
+- A polish window always advances even if ASR/LLM fail (falls back to live translations).
+- Frontend: Vue 3 + Pinia (`frontend/src/stores/session.js` handles WS messages); interface contract in `docs/dev/2026-09-28-contract-bilingual-speaker-polish.md`.
 
 ## Important Notes
 
-- **GPU required**: All servers assume `cuda:0` is available (designed for an NVIDIA 4090).
-- **API key**: `MOONSHOT_API_KEY` is hardcoded in `whisperServerTransVer.py` line 27 — treat it as a secret and consider moving it to an environment variable before sharing.
-- **No test suite**: Verify functionality manually by opening the browser UI and speaking Korean.
+- Config lives in `.env` (see `.env.example`); `MOONSHOT_API_KEY` is required. Kimi model defaults to `kimi-k2.6` with thinking disabled.
+- Keep `ASR_INITIAL_PROMPT` / `ASR_INITIAL_PROMPT_ZH` empty unless A/B-tested: generic prompts made Whisper replace real speech with prompt text or video-credit hallucinations.
+- Raw recordings and databases under `data/` are user data: read-only for experiments, never modify or delete.
