@@ -28,3 +28,6 @@ logs/
 models/
 # Local evaluation outputs (contain classroom transcripts; never commit)
 data/eval/
+
+# Local credentials handed to testers (never commit)
+data/private/
