@@ -85,7 +85,8 @@ for one line per target, `[n|zh] …` / `[n|ko] …`; a line without a code belo
 primary target. Each target is checked on its own (missing, too long, still in the
 spoken language → that target's live translation).
 
-`speakers` / `relabel` / `outline` and all client → server messages are unchanged.
+`speakers` / `relabel` / `outline` and all client → server messages are unchanged
+(control messages `client_info` and `vad_gain`: 09-28 contract §2a).
 
 ## 3. REST
 

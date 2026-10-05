@@ -324,7 +324,7 @@ test('a paused class opened from history shows its saved content and resumes it'
 test('leaving a recording class (reset, e.g. an expired login) pauses it instead of ending it', async t => {
   const { store, socket } = await liveSession(t)
   store.resetSession()
-  assert.deepEqual(socket.sent.map(message => JSON.parse(message)), [{ action: 'pause' }])
+  assert.deepEqual(socket.sent.map(message => JSON.parse(message)), [{ action: 'vad_gain', enabled: false }, { action: 'pause' }])
   assert.equal(store.recordingStatus, 'idle')
   assert.equal(FakeWebSocket.all.length, 1, 'no reconnect after leaving')
 })

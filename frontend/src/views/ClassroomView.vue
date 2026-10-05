@@ -18,6 +18,8 @@
         :busy="resuming"
         :input-level="inputLevelDb"
         :level-quiet="inputTooQuiet"
+        :vad-gain="store.vadGain"
+        @vad-gain="store.setVadGain"
         @pause="onPause"
         @resume="resumeClass"
         @stop="onStop"

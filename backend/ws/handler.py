@@ -357,6 +357,20 @@ def _client_info_text(message: dict) -> str:
     return json.dumps(info, ensure_ascii=True)
 
 
+def _vad_gain_text(gain, requested) -> str:
+    """One ASCII log line for a 小声增强 switch (contract §2a): state, strength, current estimates."""
+    def db(value):
+        return "-" if value is None else f"{value:.1f}"
+
+    text = (
+        f"enabled={'true' if gain.enabled else 'false'} max_db={gain.max_db:g} "
+        f"floor_db={db(gain.noise_floor_db)} level_db={db(gain.speech_level_db)}"
+    )
+    if not isinstance(requested, bool):
+        text += f" (ignored enabled={ascii(requested)[:40]})"
+    return text
+
+
 def _ms_since(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
 
@@ -833,7 +847,8 @@ async def handle_ws(websocket: WebSocket, session_id: str):
             f"{f'resumed at {recorded_samples // SAMPLE_RATE}s' if resuming else 'connected'}; "
             f"raw PCM -> {ascii(str(raw_pcm_path))}; "
             f"languages={'/'.join(candidates)} extra={'/'.join(extra_languages) or '-'} "
-            f"display={'/'.join(plan.display)} speakers={'on' if embedder else 'off'}"
+            f"display={'/'.join(plan.display)} speakers={'on' if embedder else 'off'} "
+            f"vad_gain={'on' if transcriber.vad_gain.enabled else 'off'}"
         )
         if resuming and len(plan.spoken) > 1:
             print(
@@ -959,6 +974,15 @@ async def handle_ws(websocket: WebSocket, session_id: str):
                 if action == "client_info":
                     # Browser and microphone diagnostics (contract §2a): logged, never stored.
                     print(f"[WS] client_info session={session_id[:8]} {_client_info_text(ctrl)}")
+                    continue
+                if action == "vad_gain":
+                    # 小声增强 for this connection (contract §2a): only Silero's copy of the
+                    # audio is lifted. A non-boolean value changes nothing; the reply is the state.
+                    requested = ctrl.get("enabled")
+                    if isinstance(requested, bool):
+                        transcriber.vad_gain.enabled = requested
+                    print(f"[WS] vad_gain session={session_id[:8]} {_vad_gain_text(transcriber.vad_gain, requested)}")
+                    await _safe_send({"status": "vad_gain", "enabled": transcriber.vad_gain.enabled})
                     continue
                 if action in ("stop", "pause"):
                     end_mode = action

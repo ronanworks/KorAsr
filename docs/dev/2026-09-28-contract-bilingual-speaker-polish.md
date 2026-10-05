@@ -98,6 +98,7 @@ Text frames on `/ws/{session_id}`; audio stays binary float32 PCM.
 | `{"action": "stop"}` | tail work (below), sends the last `done` / `polish` / `outline`, closes 1000 | `ended` |
 | `{"action": "pause"}` | same tail work and messages, closes 1000 | `paused` |
 | `{"action": "client_info", …}` (2026-10-05) | logs one line `[WS] client_info session=<id8> {…}`; no reply, nothing stored | unchanged |
+| `{"action": "vad_gain", "enabled": true\|false}` (2026-10-05) | switches 小声增强 for this connection; replies `{"status": "vad_gain", "enabled": …}`; logs one line | unchanged |
 | socket drops (no message), or server closes it (1003 bad PCM, 1008 account disabled) | same tail work, sends nothing | `paused` |
 
 Any other `action` (and non-JSON text) is ignored, so a newer client works with an older
@@ -120,6 +121,25 @@ scalar values only (ASCII-escaped, strings clipped to 200 characters):
  "queued_ms": 768,                        // audio captured before this socket opened (sent next)
  "queued_dropped_ms": 1536}               // only when more than 10 s waited: oldest audio dropped
 ```
+
+**vad_gain** (小声增强, `backend/asr/vad_gain.py`). Lifts only the copy of each block that
+Silero VAD sees (speech toward −30 dBFS, at most `VAD_INPUT_GAIN_MAX_DB` = 12 dB, the noise
+floor kept ≤ −45 dBFS, no block above −27 dBFS), so a distant quiet speaker still gets cut into
+sentences. The recording, the audio Whisper / SenseVoice hear and the interim previews are
+never changed. Every connection starts with `VAD_INPUT_GAIN_DEFAULT` (false); the level
+history is kept while it is off, so switching on mid-class ramps up within ~6 s.
+
+```jsonc
+{"action": "vad_gain", "enabled": true}     // client → server
+{"status": "vad_gain", "enabled": true}     // server → client: the state now in force
+```
+
+- `enabled` must be a boolean; anything else changes nothing (the reply still carries the state).
+- The server logs `[WS] vad_gain session=<id8> enabled=… max_db=… floor_db=… level_db=…`; nothing is stored.
+- The client keeps the switch per class (localStorage `korasr.vadGain.<session id>`) and sends it
+  on every socket open — 开始, 继续 and automatic reconnects — right after `client_info`, before
+  the queued audio. A client that never sends it (older frontend) records with the default, as before.
+- An older server ignores the action and sends no reply.
 
 Tail work = commit the transcriber's open sentence (≥ 0.5 s of speech), wait for
 every final to be recognised, translated and saved, `polish.finish()` so the

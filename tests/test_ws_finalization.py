@@ -17,6 +17,7 @@ import numpy as np
 import os
 os.environ.setdefault("MOONSHOT_API_KEY", "test-key")
 from backend.asr.transcriber import strip_repeated_boundary  # pure text helper, used for real
+from backend.asr.vad_gain import VadInputGain  # pure numpy, used for real by the stub transcriber
 
 
 HANDLER_PATH = Path(__file__).resolve().parents[1] / "backend" / "ws" / "handler.py"
@@ -105,11 +106,15 @@ class _Transcriber:
         self.audio_buffer = np.array([], dtype=np.float32)
         self._total_samples = 0
         self.last_commit_span = (0, 0)
+        # 小声增强 as in the real Transcriber: off by default, applied to the VAD's copy only.
+        self.vad_gain = VadInputGain()
+        self.vad_views = []   # what Silero would have seen, block by block
 
     def reset(self, _session_start_ms=0.0):
         self.audio_buffer = np.array([], dtype=np.float32)
         self._total_samples = 0
         self.last_commit_span = (0, 0)
+        self.vad_gain.reset()
 
     @property
     def timestamp_ms(self):
@@ -122,6 +127,7 @@ class _Transcriber:
     def push_chunk(self, chunk):
         self.audio_buffer = np.concatenate((self.audio_buffer, chunk))
         self._total_samples += len(chunk)
+        self.vad_views.append(self.vad_gain.apply(chunk))
         forced = type(self).forced.pop(0) if type(self).forced else False
         return {
             "should_process": self.should_process,
@@ -905,6 +911,76 @@ class ObservabilityTests(_HandlerTestCase):
         self.assertEqual(next(iter(self.db.segments.values())).zh_text, "译文")
         self.assertEqual(self.db.session.recording_state, "ended")
         self.assertFalse(any("client_info" in str(value) for value in vars(self.db.session).values()))
+
+    async def test_vad_gain_switches_this_connection_and_answers_with_the_state(self):
+        self.handler.translate_stream = _translate_ok
+        ws = _WebSocket([
+            {"type": "websocket.receive", "text": '{"action":"vad_gain","enabled":true}'},
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.receive", "text": '{"action":"vad_gain","enabled":"yes"}'},
+            {"type": "websocket.receive", "text": '{"action":"vad_gain","enabled":false}'},
+            {"type": "websocket.receive", "text": '{"action":"stop"}'},
+        ])
+        await asyncio.wait_for(self.handler.handle_ws(ws, self.db.session.id), 3)
+
+        replies = [m for m in ws.sent if m.get("status") == "vad_gain"]
+        self.assertEqual([m["enabled"] for m in replies], [True, True, False])   # "yes" changed nothing
+        self.assertTrue(all(set(m) == {"status", "enabled"} for m in replies))
+        self.assertFalse(_Transcriber.instances[-1].vad_gain.enabled)
+        lines = [line for line in self.logs if line.startswith("[WS] vad_gain")]
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(all(line.isascii() for line in lines))
+        self.assertIn(f"session={self.db.session.id[:8]} enabled=true max_db=12 ", lines[0])
+        self.assertIn("enabled=true", lines[1])
+        self.assertIn("(ignored enabled='yes')", lines[1])
+        self.assertIn("enabled=false", lines[2])
+        # The sentence and the stop are unaffected; nothing about the switch is stored.
+        self.assertEqual(next(iter(self.db.segments.values())).zh_text, "译文")
+        self.assertEqual(self.db.session.recording_state, "ended")
+        self.assertFalse(any("vad_gain" in str(value) for value in vars(self.db.session).values()))
+
+    async def test_a_connection_starts_with_the_default_and_an_old_client_never_switches_it(self):
+        self.handler.translate_stream = _translate_ok
+        ws = _WebSocket([
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.receive", "text": '{"action":"stop"}'},
+        ])
+        await asyncio.wait_for(self.handler.handle_ws(ws, self.db.session.id), 3)
+        self.assertFalse(_Transcriber.instances[-1].vad_gain.enabled)
+        self.assertFalse(any(m.get("status") == "vad_gain" for m in ws.sent))
+        connected = next(line for line in self.logs if " connected; " in line)
+        self.assertTrue(connected.endswith("vad_gain=off"), connected)
+
+    async def test_the_gain_reaches_only_what_vad_sees_never_the_recording_or_the_asr_audio(self):
+        heard = []
+
+        def transcribe(audio, **_kwargs):
+            heard.append(np.array(audio, copy=True))
+            return "조용한 발표"
+
+        self.handler.transcribe_audio = transcribe
+        self.handler.translate_stream = _translate_ok
+        _Transcriber.should_process = False   # one sentence, committed by the stop
+        rng = np.random.default_rng(7)
+        # A quiet student turn: speech blocks at -46 dBFS between room-noise blocks at -62 dBFS.
+        blocks = [(rng.standard_normal(4096) * 10 ** ((-62 if i % 4 == 0 else -46) / 20)).astype(np.float32)
+                  for i in range(40)]
+        ws = _WebSocket([
+            {"type": "websocket.receive", "text": '{"action":"vad_gain","enabled":true}'},
+            *({"type": "websocket.receive", "bytes": block.tobytes()} for block in blocks),
+            {"type": "websocket.receive", "text": '{"action":"stop"}'},
+        ])
+        await asyncio.wait_for(self.handler.handle_ws(ws, self.db.session.id), 5)
+
+        raw = np.concatenate(blocks)
+        recording = Path(self.tmp.name) / f"{self.db.session.id}.pcm"
+        self.assertEqual(recording.read_bytes(), raw.tobytes())            # the archive is the raw audio
+        self.assertEqual(len(heard), 1)
+        np.testing.assert_array_equal(heard[0], raw)                       # so is the clip ASR hears
+        views = _Transcriber.instances[-1].vad_views
+        lifted = [i for i, (view, block) in enumerate(zip(views, blocks)) if not np.array_equal(view, block)]
+        self.assertTrue(lifted, "Silero's copy was lifted")
+        self.assertTrue(all(blocks[i].std() > 10 ** (-50 / 20) for i in lifted), "noise blocks keep their level")
 
     async def test_unknown_control_messages_are_ignored(self):
         # A newer client may send actions this server does not know; an older client sends none.

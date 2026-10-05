@@ -6,6 +6,7 @@ from difflib import SequenceMatcher
 import numpy as np
 from backend.asr.model import get_model, get_mlx_repo
 from backend.asr.vad import SileroVAD
+from backend.asr.vad_gain import VadInputGain
 from backend.config import settings
 from backend.languages import ASR_LANGUAGES
 from backend.asr import sensevoice
@@ -378,6 +379,11 @@ class Transcriber:
             min_silence_ms=settings.vad_min_silence_ms,
             min_speech_ms=settings.vad_min_speech_ms,
         )
+        # 小声增强: only the copy each block hands to Silero is lifted; audio_buffer (Whisper,
+        # interim previews) keeps the raw samples. Switched per connection via `enabled`.
+        self.vad_gain = VadInputGain(
+            max_db=settings.vad_input_gain_max_db, enabled=settings.vad_input_gain_default,
+        )
         self.audio_buffer = np.array([], dtype=np.float32)
         self._has_speech = False
         # Audio-sample clock since recording start. The buffer always ends at the
@@ -392,6 +398,7 @@ class Transcriber:
         self._total_samples = 0
         self.last_commit_span = (0, 0)
         self.vad.reset()
+        self.vad_gain.reset()   # a new stream: level history and gain start over (commit() keeps them)
 
     @property
     def buffer_seconds(self) -> float:
@@ -420,7 +427,7 @@ class Transcriber:
         """
         self.audio_buffer = np.concatenate((self.audio_buffer, chunk))
         self._total_samples += len(chunk)
-        vad_result = self.vad.process_chunk(chunk)
+        vad_result = self.vad.process_chunk(self.vad_gain.apply(chunk))
 
         if vad_result["speech_prob"] >= settings.vad_threshold:
             self._has_speech = True

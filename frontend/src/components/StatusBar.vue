@@ -24,6 +24,13 @@
           </span>
           <span class="level-value">{{ levelRounded }} dB</span>
         </span>
+        <VadGainToggle
+          v-if="showVadGain"
+          :model-value="vadGain"
+          describedby="vad-gain-help"
+          :help="VAD_GAIN_HELP"
+          @update:model-value="$emit('vad-gain', $event)"
+        />
       </div>
       <div class="session-subline">
         <span :title="directionTitle">{{ planLabel(plan) }}</span>
@@ -33,7 +40,11 @@
         <a v-if="recordingStatus === 'saved' && recordingInfo?.available" :href="downloadUrl" download>下载录音{{ downloadIsPcm ? ' PCM' : ' WAV' }}</a>
       </div>
       <p v-if="isFinalizing" class="finalizing" role="status">{{ finalizeWarning ? '整理时间较长，结果会保存到课堂记录' : '正在保存最后一段字幕和录音…' }}</p>
-      <p v-if="isRecording && levelQuiet" class="level-hint" role="status">声音太小：把设备靠近讲话人，或换外接麦克风</p>
+      <p v-if="showVadGain" id="vad-gain-help" class="vad-gain-help">{{ VAD_GAIN_HELP }}</p>
+      <p v-if="isRecording && levelQuiet" class="level-hint" role="status">
+        <span>声音太小：把设备靠近讲话人，或换外接麦克风</span>
+        <button v-if="!vadGain" type="button" class="hint-action" @click="$emit('vad-gain', true)">打开小声增强</button>
+      </p>
     </div>
     <div class="controls">
       <template v-if="isRecording">
@@ -55,6 +66,7 @@
 
 <script setup>
 import { computed } from 'vue'
+import VadGainToggle from './VadGainToggle.vue'
 import { DEFAULT_PLAN, planDirections, planLabel } from '../utils/languages.js'
 import { LEVEL_MIN_DB, QUIET_SPEECH_DB, levelPercent } from '../utils/level.js'
 
@@ -67,13 +79,18 @@ const props = defineProps({
   busy: Boolean,   // the view is re-acquiring the microphone for 继续
   inputLevel: { type: Number, default: null },   // microphone level of the latest block, dBFS
   levelQuiet: Boolean,                           // speech stayed below -40 dBFS (utils/level.js)
+  vadGain: Boolean,                              // 小声增强 switch of this class
 })
 
 const levelRounded = computed(() => Math.round(props.inputLevel ?? LEVEL_MIN_DB))
-defineEmits(['stop', 'pause', 'resume', 'summary', 'rename', 'glossary'])
+// vad-gain(enabled): the 小声增强 switch, or the button in the "too quiet" hint.
+defineEmits(['stop', 'pause', 'resume', 'summary', 'rename', 'glossary', 'vad-gain'])
 
 // Paused, or offline and about to reconnect: 继续 and 结束 are both available.
 const canResume = computed(() => ['paused', 'reconnecting'].includes(props.recordingStatus))
+// The switch can be set while recording and while paused (sent when the class continues).
+const showVadGain = computed(() => props.isRecording || canResume.value)
+const VAD_GAIN_HELP = '讲话人离得远、字幕出不来时打开；可能多出少量错句'
 
 const frozenTimerLabel = computed(() => ({
   pausing: '暂停中', paused: '已暂停', reconnecting: '重连中', resuming: '连接中',
@@ -132,7 +149,10 @@ const downloadUrl = computed(() => downloadIsPcm.value ? props.recordingInfo?.pc
 .level-fill.quiet { background: #b7791f; }
 .level-mark { position: absolute; top: 0; bottom: 0; width: 1px; background: #8a5a12; opacity: .7; }
 .level-value { min-width: 3.4em; }
-.level-hint { color: #8a5a12; font-size: .79rem; margin: .15rem 0 0 1.1rem; }
+.level-hint { display: flex; flex-wrap: wrap; align-items: center; gap: .2rem .6rem; color: #8a5a12; font-size: .79rem; margin: .15rem 0 0 1.1rem; }
+.hint-action { min-height: 32px; padding: .2rem .7rem; border: 1px solid #e3c88f; border-radius: 999px; background: #fff8e9; color: #7a4d06; font-size: .76rem; font-weight: 680; }
+.vad-gain-help { color: var(--text-muted); font-size: .74rem; line-height: 1.45; margin: .15rem 0 0 1.1rem; }
+@media (pointer: coarse) { .hint-action { min-height: 44px; } }
 .controls { display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; justify-content: flex-end; }
 .control { min-height: 44px; padding: .5rem 1rem; border: 0; border-radius: 11px; font-weight: 680; white-space: nowrap; }
 .control.start,.control.resume { background: var(--accent); color: #fff; }

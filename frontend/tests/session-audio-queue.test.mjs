@@ -88,8 +88,9 @@ test('blocks captured while the socket opens are sent first, in order, right aft
 
   assert.equal(typeof socket.sent[0], 'string', 'client_info comes before any audio')
   assert.deepEqual(JSON.parse(socket.sent[0]), { action: 'client_info', ...INFO, queued_ms: 768 })
+  assert.deepEqual(JSON.parse(socket.sent[1]), { action: 'vad_gain', enabled: false }, 'then the 小声增强 switch')
   assert.deepEqual(audioMarkers(socket), [1, 2, 3, 4])
-  assert.ok(socket.sent.slice(1).every(item => item.byteLength === 4096 * 4), 'same 4096-sample float32 blocks')
+  assert.ok(socket.sent.slice(2).every(item => item.byteLength === 4096 * 4), 'same 4096-sample float32 blocks')
 })
 
 test('more than 10 s while connecting keeps the newest 10 s', async t => {
@@ -116,7 +117,9 @@ test('nothing is kept unless a start or resume armed it, and a failed open drops
   assert.equal(store.recordingStatus, 'prepared')
   assert.equal(store.pushAudio(block(3)), false, 'the failed attempt disarmed the buffer')
   await store.startRecording()
-  assert.deepEqual(FakeWebSocket.all.at(-1).sent, [], 'nothing from the failed attempt, no client_info without a microphone')
+  const socket = FakeWebSocket.all.at(-1)
+  assert.deepEqual(audioMarkers(socket), [], 'nothing from the failed attempt')
+  assert.deepEqual(controlMessages(socket), [{ action: 'vad_gain', enabled: false }], 'no client_info without a microphone')
 })
 
 test('继续: the first blocks after the click reach the new socket; nothing is kept after 暂停', async t => {
@@ -143,8 +146,12 @@ test('继续: the first blocks after the click reach the new socket; nothing is 
   assert.notEqual(resumed, first)
   assert.deepEqual(audioMarkers(first), [1])
   assert.deepEqual(audioMarkers(resumed), [3, 4, 5])
-  assert.deepEqual(controlMessages(resumed), [{ action: 'client_info', ...INFO, device_label: 'Built-in mic', queued_ms: 512 }])
+  assert.deepEqual(controlMessages(resumed), [
+    { action: 'client_info', ...INFO, device_label: 'Built-in mic', queued_ms: 512 },
+    { action: 'vad_gain', enabled: false },
+  ])
   assert.equal(typeof resumed.sent[0], 'string')
+  assert.equal(typeof resumed.sent[1], 'string')
 })
 
 test('client_info is re-sent when it changes while connected and never for a released microphone', async t => {
@@ -154,8 +161,9 @@ test('client_info is re-sent when it changes while connected and never for a rel
   await store.startRecording()
   const socket = FakeWebSocket.all.at(-1)
   store.setClientInfo({ ...INFO, capture_mode: 'script' })   // watchdog fell back to ScriptProcessor
-  assert.deepEqual(controlMessages(socket).map(m => m.capture_mode), ['worklet', 'script'])
-  assert.equal(controlMessages(socket)[1].queued_ms, 0)
+  const infos = controlMessages(socket).filter(m => m.action === 'client_info')
+  assert.deepEqual(infos.map(m => m.capture_mode), ['worklet', 'script'])
+  assert.equal(infos[1].queued_ms, 0)
 
   // A dropped connection: the view releases the microphone (info cleared) before the reconnect.
   store.setClientInfo(null)

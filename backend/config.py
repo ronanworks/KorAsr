@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     vad_threshold: float = 0.5
     vad_min_silence_ms: int = 600                  # down from 1000 — faster sentence boundary detection
     vad_min_speech_ms: int = 250
+    # 小声增强 (backend/asr/vad_gain.py): gain on the copy of the audio that Silero VAD sees,
+    # never on the recording or the audio Whisper hears. Each connection starts with the
+    # default; the client switches it ({"action": "vad_gain"}). Off by default: on the 10-02
+    # class it found many quiet student turns, on 09-28 about 30 % of the new sentences were wrong.
+    vad_input_gain_max_db: float = 12.0            # strength when switched on
+    vad_input_gain_default: bool = False
 
     # Occasional classroom languages (extra_languages, e.g. en/ru) need clear evidence:
     # Whisper p(L) ≥ min_prob and ≥ min_ratio × the best frequent language, and ≥ min_speech_s

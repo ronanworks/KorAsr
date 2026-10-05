@@ -6,6 +6,7 @@ import { isSpeakerIndex, mergeSpeakerList, normalizeSpeakerName, SPEAKER_NAME_MA
 import { normalizeOutline, normalizePolishChunk, upsertPolishChunk } from '../utils/polish.js'
 import { mergeSegmentUpdate, segmentFromRecord, withTranslationFields } from '../utils/segments.js'
 import { DEFAULT_PLAN, normalizePlan, planFromLegacy, planLegacyFields, planRequestFields, sessionPlan } from '../utils/languages.js'
+import { readStored, writeStored } from '../utils/storage.js'
 
 // Automatic reconnects after an unexpected close (Wi-Fi/Tailscale hiccup, laptop
 // sleep). The server pauses a class whose socket drops, so each attempt resumes it.
@@ -17,6 +18,8 @@ export const PENDING_AUDIO_MAX_SAMPLES = 16000 * 10
 // A WebSocket is in use or about to be; leaving the classroom would strand it.
 const LIVE_STATUSES = ['connecting', 'capturing', 'pausing', 'reconnecting', 'resuming']
 const CONNECT_FAILED = '无法连接录音服务，请检查网络后重试'
+// 小声增强 (contract §2a vad_gain), remembered per class in this browser: '1' on, '0' off.
+export const VAD_GAIN_KEY_PREFIX = 'korasr.vadGain.'
 
 // Trailing option of prepare/update: { bidirectional } or a plain boolean.
 function bidirectionalOption(options) {
@@ -62,6 +65,10 @@ export const useSessionStore = defineStore('session', () => {
   const pauseReason = ref(null)      // user | connection | microphone: why the class is paused
   const reconnectAttempt = ref(0)    // 1-based attempt while reconnecting
   const resumeOnOpen = ref(false)    // the history page asked the classroom to resume on open
+  // 小声增强: the user's choice for this class, sent on every socket open; the server answers
+  // with the state in force (null until this connection has answered).
+  const vadGain = ref(false)
+  const vadGainConfirmed = ref(null)
 
   const isPaused = computed(() => recordingStatus.value === 'paused')
   const isLive = computed(() => isRecording.value || LIVE_STATUSES.includes(recordingStatus.value))
@@ -126,6 +133,12 @@ export const useSessionStore = defineStore('session', () => {
     bidirectional.value = legacy.bidirectional
   }
 
+  // The switch of the class now shown: what this browser stored for it, otherwise off.
+  function loadVadGain(sessionId) {
+    vadGain.value = Boolean(sessionId) && readStored(VAD_GAIN_KEY_PREFIX + sessionId) === '1'
+    vadGainConfirmed.value = null
+  }
+
   // The plan the server saved (create/patch responses carry the arrays); else the one sent.
   function planFromResponse(data, fallback) {
     return Array.isArray(data?.languages) && Array.isArray(data?.display_languages) ? sessionPlan(data) : fallback
@@ -145,6 +158,7 @@ export const useSessionStore = defineStore('session', () => {
     currentSessionId.value = res.data.id
     sessionName.value = name
     glossaryTerms.value = terms
+    loadVadGain(res.data.id)
     applyPlan(planFromResponse(res.data, requested ?? planFromLegacy(source, target, twoWay)))
     speakers.value = {}
     outline.value = null
@@ -171,6 +185,7 @@ export const useSessionStore = defineStore('session', () => {
     clearTimeout(notesSaveTimeout)
     currentSessionId.value = sessionId
     sessionName.value = data.session.name
+    loadVadGain(sessionId)
     applyPlan(sessionPlan(data.session))
     speakers.value = mergeSpeakerList({}, data.speakers, { authoritative: true })
     outline.value = normalizeOutline(data.session.live_outline)
@@ -210,6 +225,7 @@ export const useSessionStore = defineStore('session', () => {
     ws = null
     currentSessionId.value = sessionId
     sessionName.value = data.session.name
+    loadVadGain(sessionId)
     applyPlan(sessionPlan(data.session))
     glossaryTerms.value = glossary.data?.terms || []
     notes.value = data.session.notes || ''
@@ -283,6 +299,11 @@ export const useSessionStore = defineStore('session', () => {
       segments.value = segments.value.map(s => (fixes.has(s.id) ? { ...s, speaker: fixes.get(s.id) } : s))
       return
     }
+    if (data.status === 'vad_gain') {
+      // The 小声增强 state the server now applies to this connection.
+      vadGainConfirmed.value = data.enabled === true
+      return
+    }
     // A server without per-target fields sends only `zh`: give it targets/translations too.
     const update = withTranslationFields(data)
     const idx = segments.value.findIndex(s => s.id === update.id)
@@ -352,9 +373,11 @@ export const useSessionStore = defineStore('session', () => {
         finalizeWarning.value = false
         startRecordingChecks(sessionId)
         startTimer()
-        // Before any audio: client_info, then the blocks captured while the socket was
-        // opening, in capture order. All synchronous, so no live block can come in between.
+        // Before any audio: client_info, the 小声增强 switch, then the blocks captured while the
+        // socket was opening, in capture order. All synchronous, so no live block comes in between.
         sendClientInfo(conn)
+        vadGainConfirmed.value = null
+        sendVadGain(conn)
         flushPendingAudio(conn)
         const recovering = shownAtDrop
         shownAtDrop = null
@@ -712,6 +735,25 @@ export const useSessionStore = defineStore('session', () => {
     if (clientInfo && connection?.opened) sendClientInfo(connection)
   }
 
+  // {"action":"vad_gain","enabled":…} (contract §2a): sent on every open (开始, 继续, reconnect).
+  function sendVadGain(conn) {
+    if (!conn?.opened || conn.socket.readyState !== WebSocket.OPEN) return false
+    try {
+      conn.socket.send(JSON.stringify({ action: 'vad_gain', enabled: vadGain.value }))
+      return true
+    } catch (_) {
+      return false
+    }
+  }
+
+  // 小声增强 switch: remembered for this class in this browser, applied at once while connected,
+  // otherwise sent when the next socket opens.
+  function setVadGain(enabled) {
+    vadGain.value = Boolean(enabled)
+    if (currentSessionId.value) writeStored(VAD_GAIN_KEY_PREFIX + currentSessionId.value, vadGain.value ? '1' : '0')
+    if (connection?.opened) sendVadGain(connection)
+  }
+
   function resetSession() {
     cancelReconnect()
     // Detach first so the close below is never taken for a dropped connection.
@@ -751,6 +793,7 @@ export const useSessionStore = defineStore('session', () => {
     shownAtDrop = null
     reconnectAttempt.value = 0
     resumeOnOpen.value = false
+    loadVadGain(null)
   }
 
   return {
@@ -758,10 +801,10 @@ export const useSessionStore = defineStore('session', () => {
     bidirectional, languages, extraLanguages, displayLanguages, plan, speakers, outline,
     recordingStatus, recordingInfo, isRecording, isConnected,
     isFinalizing, finalizeWarning, isPaused, isLive, pauseReason, reconnectAttempt, resumeOnOpen,
-    elapsedMs, elapsedFormatted, notes,
+    elapsedMs, elapsedFormatted, notes, vadGain, vadGainConfirmed,
     prepareSession, loadPreparedSession, loadPausedSession, updatePreparedSession, startRecording,
     pauseSession, resumeRecording, stopSession, endPausedSession, setReconnectHandler,
     updateGlossary, renameSpeaker, toggleStar, saveNotes, resetSession, _sendAudio,
-    bufferAudioUntilOpen, discardPendingAudio, pushAudio, setClientInfo,
+    bufferAudioUntilOpen, discardPendingAudio, pushAudio, setClientInfo, setVadGain,
   }
 })
