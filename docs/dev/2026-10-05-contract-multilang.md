@@ -69,6 +69,9 @@ is the **primary target**, which the old fields (`target_lang`, `zh_text`, `zh`,
   `targets: []`, `translations: {}`, `zh: ""`; no translation call.
 - `interim` messages add `targets` once the language is known (reserve placeholders).
 - Clients that ignore the new keys keep working: they read `zh` / `target_lang` as before.
+- A translation with nothing recognisable is only a marker in its target language:
+  `（听不清）` zh, `（잘 안 들림）` ko, `(inaudible)` en, `(неразборчиво)` ru (live and polish;
+  rows saved before may hold `（听不清）` for any target). It is ordinary text to display.
 
 ### Per-minute polish (`status: "polish"`)
 

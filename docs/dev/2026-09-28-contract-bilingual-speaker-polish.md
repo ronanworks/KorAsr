@@ -97,7 +97,29 @@ Text frames on `/ws/{session_id}`; audio stays binary float32 PCM.
 |---|---|---|
 | `{"action": "stop"}` | tail work (below), sends the last `done` / `polish` / `outline`, closes 1000 | `ended` |
 | `{"action": "pause"}` | same tail work and messages, closes 1000 | `paused` |
+| `{"action": "client_info", …}` (2026-10-05) | logs one line `[WS] client_info session=<id8> {…}`; no reply, nothing stored | unchanged |
 | socket drops (no message), or server closes it (1003 bad PCM, 1008 account disabled) | same tail work, sends nothing | `paused` |
+
+Any other `action` (and non-JSON text) is ignored, so a newer client works with an older
+server and the other way round.
+
+**client_info** (diagnostics only). Sent right after the socket opens, before any audio,
+once the microphone is capturing; sent again when it changes while connected (e.g. the
+AudioWorklet falls back to ScriptProcessor). Flat fields, all optional; the server logs
+scalar values only (ASCII-escaped, strings clipped to 200 characters):
+
+```jsonc
+{"action": "client_info",
+ "user_agent": "Mozilla/5.0 …",          // navigator.userAgent
+ "device_label": "MacBook Pro Microphone", // MediaStreamTrack.label
+ "noise_suppression": true, "echo_cancellation": true, "auto_gain_control": false,
+ "track_sample_rate": 48000, "channel_count": 1,  // track.getSettings(); null = not reported
+ "context_sample_rate": 16000,            // AudioContext.sampleRate
+ "capture_mode": "worklet",               // worklet | script
+ "browser_processing": true,              // the 浏览器降噪与回声消除 checkbox
+ "queued_ms": 768,                        // audio captured before this socket opened (sent next)
+ "queued_dropped_ms": 1536}               // only when more than 10 s waited: oldest audio dropped
+```
 
 Tail work = commit the transcriber's open sentence (≥ 0.5 s of speech), wait for
 every final to be recognised, translated and saved, `polish.finish()` so the
@@ -133,6 +155,13 @@ Client behaviour (frontend store): 暂停 sends `pause` and releases the microph
 继续 opens a new socket without clearing shown segments / polish / speakers /
 outline; an unexpected close retries after 2 s, 5 s and 10 s (re-acquiring the
 microphone), then shows `paused` with “连接中断，已暂停，可点继续恢复”.
+
+2026-10-05: on 开始 and 继续 the microphone and AudioWorklet are attached before the
+socket opens; their blocks wait in memory (at most 10 s, newest kept) and are sent in
+capture order right after `client_info`, then live — same 4096-sample float32 blocks, so
+the server's recording and audio clock simply include them. The resumed connection's
+language ID starts from the class's main language (`languages[0]`), not from the last
+sentence before the pause.
 
 ## 3. REST
 
