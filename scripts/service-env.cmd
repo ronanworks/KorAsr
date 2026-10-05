@@ -12,7 +12,7 @@ if not defined KORASR_HOST set "KORASR_HOST=127.0.0.1"
 if not defined KORASR_PORT set "KORASR_PORT=8000"
 
 rem The classes since 2026-09-27 live in this database and recording folder
-rem (.env still names the older data\korasr.db; these settings take precedence).
+rem (.env names the same ones since 2026-10-05; set here too so these scripts never differ).
 set "DATABASE_URL=sqlite:///./data/korasr-local-test.db"
 set "RAW_AUDIO_DIR=data/raw-local-test"
 
