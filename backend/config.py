@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     moonshot_api_key: str
     moonshot_model: str = "kimi-k2.6"
     moonshot_base_url: str = "https://api.moonshot.cn/v1"
+    # Requests per minute this server sends to Moonshot: live translation (one per sentence
+    # and target), per-minute polish, outline and summaries share it. The account allows
+    # 100/min for the whole organisation (429 "request reached organization max RPM: 100"),
+    # so 60 leaves room for other users of the key. 0 = no limit.
+    moonshot_max_rpm: int = 60
 
     # ASR 后端选择
     #   "faster_whisper" — CTranslate2 后端，CPU/CUDA 通用，4090 服务器走这个

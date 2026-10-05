@@ -2,6 +2,7 @@
 from typing import Iterable
 
 from backend.translation.moonshot import get_client, completion_options
+from backend.translation.ratelimit import acquire_moonshot_slot
 from backend.storage.models import Segment
 from backend.languages import LANGUAGE_LABELS
 from backend.config import settings
@@ -83,6 +84,7 @@ async def generate_summary(
 
     client = get_client()
     try:
+        await acquire_moonshot_slot("summary")   # shared per-minute budget (ratelimit.py)
         completion = await client.chat.completions.create(
             model=settings.moonshot_model,
             messages=[

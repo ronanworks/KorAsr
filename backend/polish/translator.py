@@ -20,7 +20,8 @@ from typing import Iterable
 
 import numpy as np
 
-from backend.translation.moonshot import get_client, completion_options
+from backend.translation.moonshot import UNCLEAR, completion_options, get_client, is_unclear_marker, unclear_marker
+from backend.translation.ratelimit import acquire_moonshot_slot
 from backend.config import settings
 from backend.asr.model import get_mlx_repo
 from backend.asr.transcriber import blacklist_hits, initial_prompt_for, looks_degenerate
@@ -40,7 +41,6 @@ LLM_TIMEOUT_S = 45.0
 LLM_RETRY_DELAY_S = 3.0
 OUTLINE_TIMEOUT_S = 30.0
 NO_CONTENT = "（无实质内容）"
-UNCLEAR = "（听不清）"
 
 
 def is_clearly_silent_audio(audio: np.ndarray) -> bool:
@@ -464,12 +464,28 @@ def _matching_terms(glossary: Iterable[tuple[str, str]], text: str, limit_chars=
 NO_TRANSLATION_HEADER = "无需翻译"
 
 
+def _unclear_instruction(target_codes: Iterable[str]) -> str:
+    """The unclear marker the polish may write, in each target language of the minute.
+
+    Only Chinese targets (or none given): exactly the old "（听不清）"."""
+    codes = [code for code in dict.fromkeys(target_codes) if code]
+    if not codes or codes == ["zh"]:
+        return UNCLEAR
+    if len(codes) == 1:
+        return unclear_marker(codes[0])
+    return "标记：" + "，".join(
+        f"译成{LANGUAGE_LABELS.get(code, code)}写{unclear_marker(code)}" for code in codes
+    )
+
+
 def build_polish_system_prompt(
     summary_lang: str, multi_target_codes: Iterable[str] = (), has_untranslated: bool = False,
+    target_codes: Iterable[str] = (),
 ) -> str:
     """multi_target_codes: languages of runs with several targets (adds the [n|code] format);
-    has_untranslated: some runs are already in the only display language.
-    Without either the prompt is exactly the single-target one."""
+    has_untranslated: some runs are already in the only display language;
+    target_codes: every target language of the minute (the unclear marker of each).
+    Without them the prompt is exactly the single-target Chinese one."""
     summary_label = LANGUAGE_LABELS.get(summary_lang, summary_lang)
     codes = list(dict.fromkeys(multi_target_codes))
     extra = ""
@@ -488,7 +504,7 @@ def build_polish_system_prompt(
         "忠实原意，可以依据上下文改正明显的同音识别错误，改动过或没把握的词后加〔?〕；"
         "专有名词认不出时保留原文或音译并加〔?〕，不要换成别的名字。"
         "不得补充原文没有的信息，不得合并、拆分或调换段落。半句就译半句，只看得懂一部分就译看得懂的部分；"
-        f"只有完全没有可辨认的词时才输出{UNCLEAR}。\n"
+        f"只有完全没有可辨认的词时才输出{_unclear_instruction(target_codes)}。\n"
         f"任务二：用{summary_label}写本分钟要点 1–3 条，每条不超过 40 字，只概括本分钟实际讲到的内容，"
         "不写“内容不完整”“无法概括”之类的说明；"
         f"只有寒暄、口头禅或没有实质内容时写{NO_CONTENT}。\n"
@@ -529,7 +545,7 @@ def build_polish_messages(
             label = speaker_label(item.get("speaker"), names)
             lang = LANGUAGE_LABELS.get(item.get("lang"), item.get("lang") or "")
             parts.append(f"{label}（{lang}）：{(item.get('source') or '')[-150:]}")
-            if item.get("translation"):
+            if item.get("translation") and not is_unclear_marker(item["translation"]):
                 parts.append(f"译文：{item['translation'][-150:]}")
         parts.append("")
     terms = _matching_terms(glossary, all_text)
@@ -548,7 +564,10 @@ def build_polish_messages(
         parts.append(run_header(index, run, names))
         parts.append(run.source or run.realtime_source)
     multi_codes = [target for run in runs if len(run.targets) > 1 for target in run.targets]
-    system = build_polish_system_prompt(summary_lang, multi_codes, any(not run.targets for run in runs))
+    system = build_polish_system_prompt(
+        summary_lang, multi_codes, any(not run.targets for run in runs),
+        target_codes=[target for run in runs for target in run.targets],
+    )
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": "\n".join(parts)},
@@ -671,11 +690,16 @@ def _is_runaway(output: str) -> bool:
     return bool(_RUNAWAY_LOOP_RE.search(output[-400:])) or len(tail) / max(1, len(zlib.compress(tail))) > 4.0
 
 
-async def _complete_streaming(messages, max_tokens: int, timeout_s: float) -> str:
-    """Stream so a runaway repetition is cut off early instead of burning the timeout."""
+async def _complete_streaming(messages, max_tokens: int, timeout_s: float, label: str = "polish") -> str:
+    """Stream so a runaway repetition is cut off early instead of burning the timeout.
+
+    The request waits for a slot of the shared Moonshot budget (ratelimit.py) inside the
+    timeout, so one attempt never takes longer than timeout_s in total.
+    """
     client = get_client()
     output = ""
     async with asyncio.timeout(timeout_s):
+        await acquire_moonshot_slot(label)
         stream = await client.chat.completions.create(
             model=settings.moonshot_model,
             messages=messages,
@@ -748,6 +772,8 @@ async def polish_runs(
             candidate = parsed.get((index, target), "")
             if not candidate and target == run.target_lang:
                 candidate = parsed.get((index, None), "")   # "[n] …" belongs to the primary target
+            if is_unclear_marker(candidate):
+                candidate = unclear_marker(target)   # any language's marker becomes the reader's
             if _translation_is_sane(candidate, run.source, run.lang, target):
                 run.translations[target] = candidate
                 polished += 1
@@ -792,7 +818,7 @@ async def update_outline(minutes: list[tuple[int, int, str]], previous_outline: 
     t0 = time.perf_counter()
     try:
         output = await _complete_streaming(
-            build_outline_messages(minutes, previous_outline, lang), 800, OUTLINE_TIMEOUT_S,
+            build_outline_messages(minutes, previous_outline, lang), 800, OUTLINE_TIMEOUT_S, label="outline",
         )
     except Exception as exc:
         print(f"[Outline] failed after {time.perf_counter() - t0:.2f}s: {type(exc).__name__}: {exc}")
