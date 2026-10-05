@@ -42,6 +42,8 @@ class KimiRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["thinking"], {"type": "disabled"})
         self.assertTrue(captured["stream"])
         self.assertNotIn("temperature", captured)
+        # A blank line ends the live translation; an explanation would follow it.
+        self.assertEqual(captured["stop"], ["\n\n"])
 
 
 if __name__ == "__main__":

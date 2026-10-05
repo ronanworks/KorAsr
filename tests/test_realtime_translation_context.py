@@ -140,6 +140,25 @@ class TranslationSanityTests(unittest.TestCase):
             "可以看作是制作过程，这里提到的AI，我们---",
         )
 
+    def test_translation_before_an_explanation_is_kept(self):
+        from backend.translation.moonshot import sanitize_translation
+        # A/B 2026-10-05, 10-02 seq 1417: the card showed half of the reasoning.
+        raw = (
+            "时间被切断了……\n\n等等，让我重新考虑。前文提到\"时间差距太大了\"，这里\"시간 절단\"可能是"
+            "\"시간 차단\"（时间阻断/中断）或\"시간 전달\"（时间传达）的误识别。\n\n根据前文\"시간이 기차가 너무 많아\"，"
+            "这里\"시간 절단\"更可能是\"시"
+        )
+        self.assertEqual(sanitize_translation("시간 절단이 되셨다고 하셨습니다.", raw, "ko", "zh"), "时间被切断了……")
+        # 09-29 seq 93: a usable first line was replaced by （听不清）.
+        raw = "然后像这样把名字标……\n\n（注：根据上下文，\"표협해서\"应为\"표시해서\"的识别错误，意为\"标记/显示\"）"
+        self.assertEqual(sanitize_translation("그 다음에 이름을 이렇게 표협해서", raw, "ko", "zh"), "然后像这样把名字标……")
+
+    def test_v2_rules_against_carry_over_and_guessing(self):
+        system = build_translation_messages("业的常见。", source_lang="zh", target_lang="ko")[0]["content"]
+        self.assertIn("不要把前文的词句或前文的译文搬进来", system)
+        self.assertIn("需要猜两个以上的词", system)
+        self.assertIn("不要写“。……”", system)
+
     def test_length_limit_depends_on_the_scripts(self):
         from backend.translation.moonshot import sanitize_translation, translation_token_budget
         source = "我们今天讲光合作用"
@@ -163,8 +182,8 @@ class FragmentHintTests(unittest.TestCase):
         from backend.translation.moonshot import fragment_hint
         self.assertEqual(fragment_hint(False, False, "ko", "설명하겠습니다."), "")
         self.assertEqual(fragment_hint(False, True, "ko", "설명하겠습니다."), "说话人可能还没说完")
-        self.assertEqual(fragment_hint(True, False, "ko", "설명하겠습니다."), "接着上一段，开头在句子中间")
-        self.assertEqual(fragment_hint(True, False, "ko", "그래서 우리가"), "接着上一段，而且说话人可能还没说完")
+        self.assertEqual(fragment_hint(True, False, "ko", "설명하겠습니다."), "开头接着上一段")
+        self.assertEqual(fragment_hint(True, False, "ko", "그래서 우리가"), "开头接着上一段，而且说话人可能还没说完")
         self.assertEqual(fragment_hint(False, False, "zh", "我们来看。"), "")
 
 
