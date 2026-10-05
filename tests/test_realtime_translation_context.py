@@ -159,6 +159,15 @@ class TranslationSanityTests(unittest.TestCase):
         self.assertIn("需要猜两个以上的词", system)
         self.assertIn("不要写“。……”", system)
 
+    def test_echoes_copies_and_mark_spellings_are_tidied(self):
+        from backend.translation.moonshot import UNCLEAR, sanitize_translation
+        # A/B 2026-10-05, 10-02 #1277: the card showed "방자의 느낌 → 放荡的感觉〔?〕".
+        self.assertEqual(sanitize_translation("방자의 느낌", "방자의 느낌 → 房子〔?〕的感觉", "ko", "zh"), "房子〔?〕的感觉")
+        self.assertEqual(sanitize_translation("방자의 느낌", "방자의 느낌……", "ko", "zh"), UNCLEAR)
+        self.assertEqual(sanitize_translation("AI", "AI", "ko", "zh"), "AI")      # a shared word is fine
+        self.assertEqual(sanitize_translation("후퇴기가 필요하다", "需要后处理（?）", "ko", "zh"), "需要后处理〔?〕")
+        self.assertEqual(sanitize_translation("후퇴기가 필요하다", "需要后处理(？)", "ko", "zh"), "需要后处理〔?〕")
+
     def test_length_limit_depends_on_the_scripts(self):
         from backend.translation.moonshot import sanitize_translation, translation_token_budget
         source = "我们今天讲光合作用"

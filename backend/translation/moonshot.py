@@ -106,6 +106,25 @@ def translation_token_budget(text: str, source_lang: str | None = None, target_l
     return max(64, min(1024, expansion_ratio(source_lang, target_lang) * len(text) + 60))
 
 
+_ECHO_RE = re.compile(r"^(.+?)\s*(?:→|->|=>)\s*(.+)$")
+_MARK_VARIANTS_RE = re.compile(r"[〔\[（(]\s*[?？]\s*[〕\]）)]")
+_PLAIN_RE = re.compile(r"[\W_]+")
+
+
+def _tidy(line: str, source: str) -> str:
+    """'원문 → 译文' keeps the translation (A/B 10-02 #1277); one spelling of 〔?〕."""
+    match = _ECHO_RE.match(line)
+    if match and _PLAIN_RE.sub("", match.group(1)) == _PLAIN_RE.sub("", source) != "":
+        line = match.group(2).strip()
+    return _MARK_VARIANTS_RE.sub(UNSURE_MARK, line)
+
+
+def _is_copy_of(line: str, source: str) -> bool:
+    """The model returned the spoken text itself (letters only, punctuation ignored)."""
+    plain = _PLAIN_RE.sub("", line)
+    return bool(plain) and plain == _PLAIN_RE.sub("", source)
+
+
 def sanitize_translation(
     source: str, translation: str, source_lang: str | None = None, target_lang: str | None = None,
 ) -> str:
@@ -119,8 +138,14 @@ def sanitize_translation(
     if not text:
         return ""
     marker = unclear_marker(target_lang)
-    lines = [line.strip() for line in text.splitlines() if line.strip() and not _NO_TEXT_RE.match(line.strip())]
+    lines = [
+        _tidy(line.strip(), source) for line in text.splitlines()
+        if line.strip() and not _NO_TEXT_RE.match(line.strip())
+    ]
     if not lines:
+        return marker
+    if all(_is_copy_of(line, source) and looks_untranslated(line, source_lang, target_lang) for line in lines):
+        # A copy of the spoken text is not a translation (A/B 10-02 #1277); "AI" → "AI" is.
         return marker
     if len(lines) > 1 and any(is_unclear_marker(line) for line in lines):
         # "partial translation ⏎⏎ （听不清）": keep what was translated.
