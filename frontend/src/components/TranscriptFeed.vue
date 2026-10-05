@@ -1,41 +1,44 @@
 <template>
-  <div class="feed" ref="feedEl">
-    <div v-if="segments.length === 0" class="empty">
-      <strong>字幕会显示在这里</strong><span>开始课堂后，原文与译文会持续更新。</span>
-    </div>
-    <div
-      v-for="seg in segments"
-      :key="seg.id"
-      class="card"
-      :class="seg.status"
-    >
-      <div class="card-meta">
-        <SpeakerChip
-          v-if="seg.speaker != null"
-          :index="seg.speaker"
-          :speakers="speakers"
-          @rename="(index, name) => emit('rename-speaker', index, name)"
-        />
-        <DirectionBadge :lang="seg.lang" :targets="seg.targets" :target-lang="seg.target_lang" :plan="plan" />
-        <span>{{ segmentStatusText(seg, mainLang) }}</span>
-        <time v-if="seg.timestamp_ms != null">{{ formatTs(seg.timestamp_ms) }}</time>
+  <div class="feed-wrap">
+    <div class="feed" ref="feedEl">
+      <div v-if="segments.length === 0" class="empty">
+        <strong>字幕会显示在这里</strong><span>开始课堂后，原文与译文会持续更新。</span>
       </div>
-      <button class="star" :class="{ active: seg.is_starred }" :aria-label="seg.is_starred ? '取消重点标记' : '标记重点'" :aria-pressed="Boolean(seg.is_starred)" @click="emit('star', seg.id)">
-        {{ seg.is_starred ? '★' : '☆' }}
-      </button>
-      <div class="source" :lang="seg.lang || mainLang">{{ seg.ko }}</div>
-      <!-- One line per target language, in display order; several targets get a language tag. -->
       <div
-        v-for="(line, i) in visibleLines(seg)"
-        :key="line.lang || i"
-        class="target"
-        :class="[line.state, { tagged: isMulti(seg) }]"
-        :lang="line.lang || readingLang"
+        v-for="seg in segments"
+        :key="seg.id"
+        class="card"
+        :class="seg.status"
       >
-        <span v-if="isMulti(seg) && line.lang" class="target-tag" :title="languageLabel(line.lang)">{{ shortLanguageLabel(line.lang) }}</span>
-        <span class="target-text">{{ lineText(seg, line) }}</span>
+        <div class="card-meta">
+          <SpeakerChip
+            v-if="seg.speaker != null"
+            :index="seg.speaker"
+            :speakers="speakers"
+            @rename="(index, name) => emit('rename-speaker', index, name)"
+          />
+          <DirectionBadge :lang="seg.lang" :targets="seg.targets" :target-lang="seg.target_lang" :plan="plan" />
+          <span>{{ segmentStatusText(seg, mainLang) }}</span>
+          <time v-if="seg.timestamp_ms != null">{{ formatTs(seg.timestamp_ms) }}</time>
+        </div>
+        <button class="star" :class="{ active: seg.is_starred }" :aria-label="seg.is_starred ? '取消重点标记' : '标记重点'" :aria-pressed="Boolean(seg.is_starred)" @click="emit('star', seg.id)">
+          {{ seg.is_starred ? '★' : '☆' }}
+        </button>
+        <div class="source" :lang="seg.lang || mainLang">{{ seg.ko }}</div>
+        <!-- One line per target language, in display order; several targets get a language tag. -->
+        <div
+          v-for="(line, i) in visibleLines(seg)"
+          :key="line.lang || i"
+          class="target"
+          :class="[line.state, { tagged: isMulti(seg) }]"
+          :lang="line.lang || readingLang"
+        >
+          <span v-if="isMulti(seg) && line.lang" class="target-tag" :title="languageLabel(line.lang)">{{ shortLanguageLabel(line.lang) }}</span>
+          <span class="target-text">{{ lineText(seg, line) }}</span>
+        </div>
       </div>
     </div>
+    <button v-if="!isAtBottom && segments.length" type="button" class="jump-latest" @click="jumpToLatest">回到最新 ↓</button>
   </div>
 </template>
 
@@ -49,6 +52,8 @@ const props = defineProps({
   segments: { type: Array, default: () => [] },
   plan: { type: Object, default: () => DEFAULT_PLAN },
   speakers: { type: Object, default: () => ({}) },
+  // Any change jumps to the newest card and follows new ones again (a resumed class).
+  jumpToken: { type: Number, default: 0 },
 })
 const emit = defineEmits(['star', 'rename-speaker'])
 const feedEl = ref(null)
@@ -105,6 +110,14 @@ watch(() => [props.segments.length, lastCardSignature.value], async () => {
   }
 })
 
+// 回到最新 / a resumed class: show the newest card and keep following new ones.
+async function jumpToLatest() {
+  isAtBottom.value = true
+  await nextTick()
+  if (feedEl.value) feedEl.value.scrollTop = feedEl.value.scrollHeight
+}
+watch(() => props.jumpToken, () => { jumpToLatest() })
+
 function formatTs(ms) {
   const total = Math.floor(ms / 1000)
   return `${Math.floor(total / 60).toString().padStart(2, '0')}:${(total % 60).toString().padStart(2, '0')}`
@@ -112,7 +125,13 @@ function formatTs(ms) {
 </script>
 
 <style scoped>
-.feed { flex: 1; overflow-y: auto; padding: clamp(1rem,2vw,1.5rem); display: flex; flex-direction: column; gap: .8rem; }
+.feed-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
+.feed { flex: 1; min-height: 0; overflow-y: auto; padding: clamp(1rem,2vw,1.5rem); display: flex; flex-direction: column; gap: .8rem; }
+.jump-latest {
+  position: absolute; right: clamp(1rem,2vw,1.5rem); bottom: 1rem; z-index: 2; min-height: 40px; padding: .45rem .9rem;
+  border: 1px solid #cfdef2; border-radius: 999px; background: #fff; color: var(--accent); font-size: .82rem; font-weight: 680;
+  box-shadow: 0 4px 14px #1e3a5a24; cursor: pointer;
+}
 .empty { color: var(--text-muted); text-align: center; margin: auto; display: grid; gap: .35rem; }
 .empty strong { color: var(--text); font-size: 1.1rem; }
 .card {

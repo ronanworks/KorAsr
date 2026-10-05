@@ -10,6 +10,10 @@ import { DEFAULT_PLAN, normalizePlan, planFromLegacy, planLegacyFields, planRequ
 // Automatic reconnects after an unexpected close (Wi-Fi/Tailscale hiccup, laptop
 // sleep). The server pauses a class whose socket drops, so each attempt resumes it.
 export const RECONNECT_DELAYS_MS = [2000, 5000, 10000]
+// 开始 / 继续: microphone blocks captured while the socket is still opening wait in memory
+// (at most 10 s; beyond that the oldest are dropped) and are sent in order right after it
+// opens, so the first words after the click are not lost. Same 4096-sample float32 blocks.
+export const PENDING_AUDIO_MAX_SAMPLES = 16000 * 10
 // A WebSocket is in use or about to be; leaving the classroom would strand it.
 const LIVE_STATUSES = ['connecting', 'capturing', 'pausing', 'reconnecting', 'resuming']
 const CONNECT_FAILED = '无法连接录音服务，请检查网络后重试'
@@ -76,6 +80,12 @@ export const useSessionStore = defineStore('session', () => {
   let reconnectHandler = null
   // Segment ids on screen when the connection dropped; reconciled once it is back.
   let shownAtDrop = null
+  // Blocks captured before the socket opened (null: not buffering); see PENDING_AUDIO_MAX_SAMPLES.
+  let pendingAudio = null
+  let pendingSamples = 0
+  let pendingDroppedSamples = 0
+  // Browser / microphone description from the classroom view, sent as client_info (contract §2a).
+  let clientInfo = null
 
   const elapsedFormatted = computed(() => {
     const total = Math.floor(elapsedMs.value / 1000)
@@ -342,9 +352,12 @@ export const useSessionStore = defineStore('session', () => {
         finalizeWarning.value = false
         startRecordingChecks(sessionId)
         startTimer()
+        // Before any audio: client_info, then the blocks captured while the socket was
+        // opening, in capture order. All synchronous, so no live block can come in between.
+        sendClientInfo(conn)
+        flushPendingAudio(conn)
         const recovering = shownAtDrop
         shownAtDrop = null
-        // The caller must not attach the microphone before these state changes.
         resolve()
         if (recovering) syncAfterDrop(sessionId, recovering)
       }
@@ -364,12 +377,14 @@ export const useSessionStore = defineStore('session', () => {
         recordingStatus.value = fallbackStatus
         connection = null
         ws = null
+        discardPendingAudio()
       }
       return
     }
     if (!isCurrent) return   // replaced by a newer socket, or another class is shown
     connection = null
     ws = null
+    discardPendingAudio()
     clearInterval(recordingCheckInterval)
     clearTimeout(finalizeNoticeTimeout)
     stopTimer()
@@ -499,6 +514,7 @@ export const useSessionStore = defineStore('session', () => {
     const conn = connection
     if (!conn || !conn.opened || !isRecording.value) return false
     conn.intent = 'pause'
+    discardPendingAudio()
     isRecording.value = false   // the classroom view releases the microphone
     stopTimer()
     clearInterval(recordingCheckInterval)
@@ -520,6 +536,7 @@ export const useSessionStore = defineStore('session', () => {
   function stopSession() {
     if (isFinalizing.value) return
     cancelReconnect()
+    discardPendingAudio()
     const conn = connection
     isRecording.value = false   // 立即让 ClassroomView 的 watch 关麦克风、不再 _sendAudio
     stopTimer()
@@ -630,6 +647,71 @@ export const useSessionStore = defineStore('session', () => {
     return false
   }
 
+  // 开始 / 继续: from now until the socket opens, pushAudio() keeps blocks in memory.
+  function bufferAudioUntilOpen() {
+    pendingAudio = []
+    pendingSamples = 0
+    pendingDroppedSamples = 0
+  }
+
+  function discardPendingAudio() {
+    pendingAudio = null
+    pendingSamples = 0
+    pendingDroppedSamples = 0
+  }
+
+  // One microphone block (ArrayBuffer of float32): sent while recording; kept (≤ 10 s, oldest
+  // dropped) while a socket the view started is still opening; otherwise dropped.
+  // Returns true when the block was sent or kept.
+  function pushAudio(buffer) {
+    if (isRecording.value && connection?.opened && ws?.readyState === WebSocket.OPEN) return _sendAudio(buffer)
+    if (!pendingAudio) return false
+    pendingAudio.push(buffer)
+    pendingSamples += buffer.byteLength / 4
+    while (pendingSamples > PENDING_AUDIO_MAX_SAMPLES && pendingAudio.length > 1) {
+      const dropped = pendingAudio.shift().byteLength / 4
+      pendingSamples -= dropped
+      pendingDroppedSamples += dropped
+    }
+    return true
+  }
+
+  function flushPendingAudio(conn) {
+    const queued = pendingAudio
+    discardPendingAudio()
+    if (!queued) return
+    for (const buffer of queued) {
+      try {
+        conn.socket.send(buffer)
+      } catch (error) {
+        console.error('WebSocket audio send failed', error)
+        return
+      }
+    }
+  }
+
+  // {"action":"client_info", …}: browser and microphone diagnostics the server only logs.
+  // queued_ms: audio captured before this socket opened (sent right after this message).
+  function sendClientInfo(conn) {
+    if (!clientInfo || !conn?.opened || conn.socket.readyState !== WebSocket.OPEN) return false
+    const message = { action: 'client_info', ...clientInfo, queued_ms: Math.round(pendingSamples / 16) }
+    if (pendingDroppedSamples) message.queued_dropped_ms = Math.round(pendingDroppedSamples / 16)
+    try {
+      conn.socket.send(JSON.stringify(message))
+      return true
+    } catch (_) {
+      return false
+    }
+  }
+
+  // The classroom view describes the browser and microphone once it is capturing; sent when a
+  // socket opens and again whenever it changes while connected (e.g. ScriptProcessor fallback).
+  // null when the microphone is released, so a reconnect never reports a stopped track.
+  function setClientInfo(info) {
+    clientInfo = info && typeof info === 'object' ? { ...info } : null
+    if (clientInfo && connection?.opened) sendClientInfo(connection)
+  }
+
   function resetSession() {
     cancelReconnect()
     // Detach first so the close below is never taken for a dropped connection.
@@ -643,6 +725,8 @@ export const useSessionStore = defineStore('session', () => {
       try { socket.send(JSON.stringify({ action: 'pause' })) } catch (_) {}
     }
     try { socket?.close() } catch (_) {}
+    discardPendingAudio()
+    clientInfo = null
     clearTimer()
     clearInterval(recordingCheckInterval)
     clearTimeout(notesSaveTimeout)
@@ -678,5 +762,6 @@ export const useSessionStore = defineStore('session', () => {
     prepareSession, loadPreparedSession, loadPausedSession, updatePreparedSession, startRecording,
     pauseSession, resumeRecording, stopSession, endPausedSession, setReconnectHandler,
     updateGlossary, renameSpeaker, toggleStar, saveNotes, resetSession, _sendAudio,
+    bufferAudioUntilOpen, discardPendingAudio, pushAudio, setClientInfo,
   }
 })

@@ -16,6 +16,8 @@
         :reconnect-attempt="store.reconnectAttempt"
         :reconnect-total="RECONNECT_DELAYS_MS.length"
         :busy="resuming"
+        :input-level="inputLevelDb"
+        :level-quiet="inputTooQuiet"
         @pause="onPause"
         @resume="resumeClass"
         @stop="onStop"
@@ -52,7 +54,7 @@
         </header>
         <div class="live-body" :class="{ 'with-panel': auxiliaryPanel }">
           <section class="transcript-panel" aria-label="实时双语字幕">
-            <TranscriptFeed :segments="store.segments" :plan="store.plan" :speakers="store.speakers" @star="store.toggleStar" @rename-speaker="onRenameSpeaker" />
+            <TranscriptFeed :segments="store.segments" :plan="store.plan" :speakers="store.speakers" :jump-token="feedJumpToken" @star="store.toggleStar" @rename-speaker="onRenameSpeaker" />
           </section>
           <aside v-if="auxiliaryPanel" class="auxiliary-panel" :aria-label="auxiliaryPanelLabel">
             <div class="auxiliary-top"><strong>{{ auxiliaryPanelLabel }}</strong><button @click="auxiliaryPanel = null">{{ isMobile ? '返回字幕' : '关闭面板' }}</button></div>
@@ -208,6 +210,7 @@ import {
   languageLabel, planDirections, planLabel, sessionPlan, validatePlan,
 } from '../utils/languages.js'
 import { formatAudioTime } from '../utils/polish.js'
+import { createLevelMeter } from '../utils/level.js'
 
 const store = useSessionStore()
 let micStream = null
@@ -216,7 +219,7 @@ let audioProcessor = null
 let audioSource = null
 let stopRecordingWatch = null
 let audioWatchdog = null
-let audioBlocksSent = 0
+let audioBlocksCaptured = 0
 let audioMode = null
 let viewUnmounted = false
 const micError = ref('')
@@ -224,6 +227,16 @@ const speakerError = ref('')
 let speakerErrorTimeout = null
 const browserProcessingEnabled = ref(true)
 const micProcessingStatus = ref(null)
+// Input level in the status bar (dBFS per 256 ms block) and the "too quiet" hint.
+const levelMeter = createLevelMeter()
+const inputLevelDb = ref(null)
+const inputTooQuiet = ref(false)
+let meterBlocks = 0
+// Bumped whenever a socket opens (start, 继续, reconnect): the feed jumps to the newest card.
+const feedJumpToken = ref(0)
+watch(() => store.recordingStatus, (status, previous) => {
+  if (status === 'capturing' && previous !== 'capturing') feedJumpToken.value += 1
+})
 
 function actualAudioSetting(settings, supported, name) {
   const value = settings[name]
@@ -256,6 +269,13 @@ function stopMicrophone() {
     audioContext = null
   }
   audioMode = null
+  // No microphone: nothing waits for a socket, and a reconnect must not report a stopped track.
+  store.discardPendingAudio()
+  store.setClientInfo(null)
+  levelMeter.reset()
+  meterBlocks = 0
+  inputLevelDb.value = null
+  inputTooQuiet.value = false
 }
 
 onUnmounted(() => {
@@ -525,6 +545,10 @@ async function beginRecording() {
     // AudioContext before awaiting any server call.
     await prepareMicrophone(browserProcessingEnabled.value)
     if (attempt !== startAttempt || viewUnmounted) { stopMicrophone(); return }
+    // Capture from now on; the store keeps the blocks until the socket is open.
+    store.bufferAudioUntilOpen()
+    await attachMicrophone()
+    if (attempt !== startAttempt || viewUnmounted) { stopMicrophone(); return }
     // The plan is sent again: the PATCH must not fall back to legacy fields before recording.
     await store.updatePreparedSession(
       newSessionName.value.trim(), terms, plan.languages[0], plan.displayLanguages[0], { plan },
@@ -537,7 +561,7 @@ async function beginRecording() {
       stopMicrophone()
       return
     }
-    await attachMicrophone()
+    startAudioWatchdog()
     auxiliaryPanel.value = null
   } catch (error) {
     stopMicrophone()
@@ -562,8 +586,12 @@ async function resumeClass() {
   micError.value = ''
   actionError.value = ''
   try {
-    // Ask for the microphone while the click still counts as a user gesture.
+    // Ask for the microphone while the click still counts as a user gesture, and capture
+    // at once: the first words after 继续 wait in the store until the socket is open.
     await prepareMicrophone(browserProcessingEnabled.value)
+    if (attempt !== startAttempt || viewUnmounted) { stopMicrophone(); return }
+    store.bufferAudioUntilOpen()
+    await attachMicrophone()
     if (attempt !== startAttempt || viewUnmounted) { stopMicrophone(); return }
     await store.resumeRecording()
     connected = true
@@ -572,7 +600,7 @@ async function resumeClass() {
       stopMicrophone()
       return
     }
-    await attachMicrophone()
+    startAudioWatchdog()
   } catch (error) {
     stopMicrophone()
     micProcessingStatus.value = null
@@ -587,7 +615,8 @@ async function reacquireMicrophone() {
   stopMicrophone()
   try {
     await prepareMicrophone(browserProcessingEnabled.value)
-    await attachMicrophone()
+    await attachMicrophone()   // the socket is already open: blocks go straight out
+    startAudioWatchdog()
     micError.value = ''
   } catch (error) {
     stopMicrophone()
@@ -670,9 +699,41 @@ async function prepareMicrophone(enableBrowserProcessing) {
   if (viewUnmounted) throw new Error('页面已关闭')
 }
 
+// Every microphone block: sent (or kept until the socket opens) first, then measured.
 function sendAudioBlock(buffer) {
-  if (!store.isRecording || !store.isConnected) return
-  if (store._sendAudio(buffer)) audioBlocksSent += 1
+  audioBlocksCaptured += 1
+  store.pushAudio(buffer)
+  measureBlock(buffer)
+}
+
+// 4096 multiply-adds per 256 ms block; the 30 s assessment (a sort of ~120 numbers) once a second.
+function measureBlock(buffer) {
+  try {
+    const db = levelMeter.add(new Float32Array(buffer))
+    // A meter that falls back slowly (12 dB/s) is easier to read than raw 256 ms levels.
+    inputLevelDb.value = inputLevelDb.value == null ? db : Math.max(db, inputLevelDb.value - 3)
+    meterBlocks += 1
+    if (meterBlocks % 4 === 0) inputTooQuiet.value = levelMeter.assess().quiet
+  } catch (_) { /* the meter is only a hint */ }
+}
+
+// client_info (contract §2a): what the server logs about this browser and microphone.
+function describeClient() {
+  const track = micStream?.getAudioTracks()[0]
+  const settings = track?.getSettings?.() || {}
+  const known = value => (value === undefined ? null : value)
+  return {
+    user_agent: navigator.userAgent,
+    device_label: track?.label || '',
+    noise_suppression: known(settings.noiseSuppression),
+    echo_cancellation: known(settings.echoCancellation),
+    auto_gain_control: known(settings.autoGainControl),
+    track_sample_rate: known(settings.sampleRate),
+    channel_count: known(settings.channelCount),
+    context_sample_rate: audioContext?.sampleRate ?? null,
+    capture_mode: audioMode,
+    browser_processing: micProcessingStatus.value?.requested ?? browserProcessingEnabled.value,
+  }
 }
 
 function attachScriptProcessor() {
@@ -692,11 +753,12 @@ function attachScriptProcessor() {
   audioMode = 'script'
 }
 
+// Started once the socket is open: the microphone must keep producing blocks.
 function startAudioWatchdog() {
   clearTimeout(audioWatchdog)
-  const baseline = audioBlocksSent
+  const baseline = audioBlocksCaptured
   audioWatchdog = setTimeout(async () => {
-    if (!store.isRecording || viewUnmounted || audioBlocksSent > baseline) return
+    if (!store.isRecording || viewUnmounted || audioBlocksCaptured > baseline) return
     console.error('No microphone PCM blocks', {
       mode: audioMode, contextState: audioContext?.state,
       trackState: micStream?.getAudioTracks()[0]?.readyState,
@@ -705,6 +767,7 @@ function startAudioWatchdog() {
       try {
         attachScriptProcessor()
         await audioContext.resume()
+        store.setClientInfo(describeClient())   // the server log shows the switch to 'script'
         startAudioWatchdog()
         return
       } catch (error) {
@@ -716,11 +779,13 @@ function startAudioWatchdog() {
   }, 3500)
 }
 
+// Connects the capture node. Before the socket is open (开始 / 继续) its blocks wait in the
+// store; the watchdog is started by the caller once the socket is open.
 async function attachMicrophone() {
-  if (!micStream || !audioContext || !store.isRecording) {
+  if (!micStream || !audioContext) {
     throw new Error('录音连接未就绪')
   }
-  audioBlocksSent = 0
+  audioBlocksCaptured = 0
   audioSource = audioContext.createMediaStreamSource(micStream)
   const track = micStream.getAudioTracks()[0]
   track.onended = () => {
@@ -745,7 +810,7 @@ async function attachMicrophone() {
     attachScriptProcessor()
   }
   await audioContext.resume()
-  startAudioWatchdog()
+  store.setClientInfo(describeClient())
   stopRecordingWatch = watch(() => store.isRecording, v => {
     if (!v) stopMicrophone()
   })

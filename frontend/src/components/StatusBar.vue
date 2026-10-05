@@ -7,6 +7,23 @@
         <strong v-else class="session-name">{{ sessionName || '尚未开始课堂' }}</strong>
         <span v-if="isRecording" class="timer">录音 {{ elapsedFormatted }}</span>
         <span v-else-if="frozenTimerLabel" class="timer frozen">{{ frozenTimerLabel }} · {{ elapsedFormatted }}</span>
+        <span
+          v-if="isRecording && inputLevel != null"
+          class="level"
+          role="meter"
+          aria-label="输入电平"
+          :aria-valuemin="LEVEL_MIN_DB"
+          aria-valuemax="0"
+          :aria-valuenow="levelRounded"
+          :aria-valuetext="`${levelRounded} dBFS`"
+          :title="`输入电平 ${levelRounded} dBFS（讲话低于 ${QUIET_SPEECH_DB} dBFS 时识别容易漏句）`"
+        >
+          <span class="level-track" aria-hidden="true">
+            <span class="level-fill" :class="{ quiet: levelQuiet }" :style="{ width: `${levelPercent(inputLevel)}%` }"></span>
+            <span class="level-mark" :style="{ left: `${levelPercent(QUIET_SPEECH_DB)}%` }"></span>
+          </span>
+          <span class="level-value">{{ levelRounded }} dB</span>
+        </span>
       </div>
       <div class="session-subline">
         <span :title="directionTitle">{{ planLabel(plan) }}</span>
@@ -16,6 +33,7 @@
         <a v-if="recordingStatus === 'saved' && recordingInfo?.available" :href="downloadUrl" download>下载录音{{ downloadIsPcm ? ' PCM' : ' WAV' }}</a>
       </div>
       <p v-if="isFinalizing" class="finalizing" role="status">{{ finalizeWarning ? '整理时间较长，结果会保存到课堂记录' : '正在保存最后一段字幕和录音…' }}</p>
+      <p v-if="isRecording && levelQuiet" class="level-hint" role="status">声音太小：把设备靠近讲话人，或换外接麦克风</p>
     </div>
     <div class="controls">
       <template v-if="isRecording">
@@ -38,6 +56,7 @@
 <script setup>
 import { computed } from 'vue'
 import { DEFAULT_PLAN, planDirections, planLabel } from '../utils/languages.js'
+import { LEVEL_MIN_DB, QUIET_SPEECH_DB, levelPercent } from '../utils/level.js'
 
 const props = defineProps({
   isRecording: Boolean, isConnected: Boolean, isFinalizing: Boolean, finalizeWarning: Boolean,
@@ -46,7 +65,11 @@ const props = defineProps({
   recordingStatus: String, sessionId: String, recordingInfo: Object,
   pauseReason: String, reconnectAttempt: { type: Number, default: 0 }, reconnectTotal: { type: Number, default: 3 },
   busy: Boolean,   // the view is re-acquiring the microphone for 继续
+  inputLevel: { type: Number, default: null },   // microphone level of the latest block, dBFS
+  levelQuiet: Boolean,                           // speech stayed below -40 dBFS (utils/level.js)
 })
+
+const levelRounded = computed(() => Math.round(props.inputLevel ?? LEVEL_MIN_DB))
 defineEmits(['stop', 'pause', 'resume', 'summary', 'rename', 'glossary'])
 
 // Paused, or offline and about to reconnect: 继续 and 结束 are both available.
@@ -103,6 +126,13 @@ const downloadUrl = computed(() => downloadIsPcm.value ? props.recordingInfo?.pc
 .session-subline,.finalizing { color: var(--text-muted); font-size: .79rem; margin: .15rem 0 0 1.1rem; }
 .session-subline a { font-weight: 700; }
 .storage-warning { color: var(--error); font-weight: 700; }
+.level { display: inline-flex; align-items: center; gap: .35rem; font-size: .74rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.level-track { position: relative; width: 64px; height: 6px; border-radius: 3px; background: var(--surface-soft); border: 1px solid var(--border); overflow: hidden; }
+.level-fill { position: absolute; inset: 0 auto 0 0; background: #2c8b66; transition: width .12s linear; }
+.level-fill.quiet { background: #b7791f; }
+.level-mark { position: absolute; top: 0; bottom: 0; width: 1px; background: #8a5a12; opacity: .7; }
+.level-value { min-width: 3.4em; }
+.level-hint { color: #8a5a12; font-size: .79rem; margin: .15rem 0 0 1.1rem; }
 .controls { display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; justify-content: flex-end; }
 .control { min-height: 44px; padding: .5rem 1rem; border: 0; border-radius: 11px; font-weight: 680; white-space: nowrap; }
 .control.start,.control.resume { background: var(--accent); color: #fff; }
