@@ -1,9 +1,10 @@
 # backend/asr/langid.py
-"""Per-utterance spoken-language detection, restricted to the session's languages.
+"""Per-utterance spoken-language detection, restricted to the class's languages.
 
 2026-09-28 课堂录音显示约 40% 的语音块是中文；把语言固定为韩语时，Whisper 会把中文
 直接"翻译"成韩文，再被 Kimi 译回中文，信息两次失真。这里在每个定稿句识别前先用
-Whisper 自带的语言识别（一次 encoder 前向，4090 上约数十毫秒）在会话的两种语言里选一种。
+Whisper 自带的语言识别（一次 encoder 前向，4090 上约数十毫秒）在常用语言里选一种；
+偶尔出现的语言（如英语、俄语）要有明确证据才切换（choose_language_tiered）。
 """
 from dataclasses import dataclass, field
 
@@ -64,11 +65,62 @@ def choose_language(
     return LanguageDecision(best, shares[best], total, probs)
 
 
+def choose_language_tiered(
+    probs: dict[str, float],
+    frequent: tuple[str, ...],
+    extra: tuple[str, ...],
+    duration_s: float,
+    speech_s: float,
+    previous: str | None = None,
+) -> LanguageDecision:
+    """Frequent languages exactly as choose_language; occasional ones only on clear evidence.
+
+    2026-10-05 measurement on the 10-02 class (data/eval/2026-10-05/multilang/design.md §8):
+    adding en/ru as ordinary candidates turned 42 noise clips into "Thank you." /
+    "Продолжение следует..." subtitles and changed 21 saved Korean/Chinese sentences.
+    With this gate (θ=0.5, k=2, ≥1 s of speech; a plain majority while an English
+    turn continues) 30 of the 48 English clips were shown and no saved sentence changed:
+    - the most likely occasional language L is chosen when p(L) ≥ θ, p(L) ≥ k·max(p frequent)
+      and the clip holds ≥ 1 s of speech after trimming silence;
+    - when the previous sentence was already L: p(L) ≥ max(p frequent) and p(L) ≥ 0.2;
+    - otherwise the frequent languages decide with today's shares, hysteresis and
+      not-speech thresholds (an occasional previous language gives no hysteresis).
+    """
+    if extra and probs:
+        best_extra = max(extra, key=lambda code: float(probs.get(code, 0.0)))
+        p_extra = float(probs.get(best_extra, 0.0))
+        p_frequent = {code: float(probs.get(code, 0.0)) for code in frequent}
+        best_frequent = max(p_frequent.values())
+        if previous == best_extra:
+            accept = p_extra >= best_frequent and p_extra >= settings.langid_extra_sticky_min_prob
+        else:
+            accept = (
+                p_extra >= settings.langid_extra_min_prob
+                and p_extra >= settings.langid_extra_min_ratio * best_frequent
+                and speech_s >= settings.langid_extra_min_speech_s
+            )
+        if accept:
+            total = p_extra + sum(p_frequent.values())
+            return LanguageDecision(best_extra, p_extra / max(total, 1e-9), total, probs)
+    return choose_language(probs, frequent, duration_s, previous if previous in frequent else None)
+
+
 def detect_language(
     audio: np.ndarray, candidates: tuple[str, ...], previous: str | None = None,
+    extra: tuple[str, ...] = (),
 ) -> LanguageDecision:
-    """Blocking helper for worker threads: run Whisper language ID only when it matters."""
+    """Blocking helper for worker threads: run Whisper language ID only when it matters.
+
+    candidates: the frequent classroom languages; extra: occasional ones (tiered rule).
+    Without occasional languages this is exactly the two-language decision of before.
+    """
     duration_s = len(audio) / 16000
-    if len(candidates) == 1:
-        return choose_language({}, candidates, duration_s, previous)
-    return choose_language(detect_language_probs(audio), candidates, duration_s, previous)
+    if not extra:
+        if len(candidates) == 1:
+            return choose_language({}, candidates, duration_s, previous)
+        return choose_language(detect_language_probs(audio), candidates, duration_s, previous)
+    from backend.speaker.embedding import speech_duration_s
+    return choose_language_tiered(
+        detect_language_probs(audio), tuple(candidates), tuple(extra), duration_s,
+        speech_duration_s(audio), previous,
+    )

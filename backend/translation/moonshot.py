@@ -55,7 +55,14 @@ def build_system_prompt(source_lang: str, target_lang: str) -> str:
     )
 
 
-_META_RE = re.compile(r"语境|原文|注[:：]|網路|网络流行|梗|可能是指|意思是|结合前文|這裡|这里是")
+_META_RE = re.compile(
+    r"语境|原文|注[:：]|網路|网络流行|梗|可能是指|意思是|结合前文|這裡|这里是"
+    # The same kind of explanation written in the target language (Korean / English / Russian).
+    r"|원문|문맥상|의미입니다|뜻입니다|참고[:：]|번역[:：]"
+    r"|(?i:\bin this context\b|\boriginal text\b|\bit (?:probably |likely )?means\b"
+    r"|\b(?:probably|likely|possibly) refers to\b|\bnote[:：]|\btranslation[:：])"
+    r"|(?i:в данном контексте|оригинал[ае]?\b|означает|примечание|перевод[:：])"
+)
 # A line with no letters at all ("-", "---", "……") is not a translation (10-02 seq 152).
 _NO_TEXT_RE = re.compile(r"^[\W_]*$")
 

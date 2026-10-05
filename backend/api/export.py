@@ -9,7 +9,7 @@ from sqlmodel import Session as DBSession, select
 from backend.storage.database import get_db
 from backend.storage.models import Session as SessionModel, Segment, PolishedChunk, User
 from backend.auth import current_user
-from backend.languages import LANGUAGE_LABELS
+from backend.languages import LANGUAGE_LABELS, LanguagePlan, segment_translations, session_plan
 
 router = APIRouter(prefix="/api/sessions", tags=["export"])
 
@@ -29,13 +29,39 @@ def _speaker(index, names) -> str:
     return f"说话人{index + 1}" + (f"（{name}）" if name else "")
 
 
-def _lang_tag(seg, sess) -> str:
-    """Only mark sentences whose direction differs from the session default."""
+def _label(code) -> str:
+    return LANGUAGE_LABELS.get(code, code or "?")
+
+
+def _lang_tag(seg, plan: LanguagePlan, translations: dict) -> str:
+    """Only mark sentences not in the main language: [中文→韩语], [英语→中文/韩语]."""
     lang = getattr(seg, "lang", None)
-    if not lang or lang == sess.source_lang:
+    if not lang or lang == plan.main:
         return ""
-    target = getattr(seg, "target_lang", None) or sess.source_lang
-    return f"[{LANGUAGE_LABELS.get(lang, lang)}→{LANGUAGE_LABELS.get(target, target)}] "
+    targets = "/".join(_label(target) for target in translations)
+    return f"[{_label(lang)}→{targets}] " if targets else f"[{_label(lang)}] "
+
+
+def _plan_description(plan: LanguagePlan) -> str:
+    """'韩语 → 中文（课堂语言：韩语、中文；偶尔：英语；显示：中文、韩语）'."""
+    details = [f"课堂语言：{'、'.join(_label(code) for code in plan.frequent)}"]
+    if plan.extra:
+        details.append(f"偶尔：{'、'.join(_label(code) for code in plan.extra)}")
+    details.append(f"显示：{'、'.join(_label(code) for code in plan.display)}")
+    return f"{_label(plan.main)} → {_label(plan.reading)}（{'；'.join(details)}）"
+
+
+def _run_translations(run: dict) -> dict:
+    translations = run.get("translations")
+    if isinstance(translations, dict) and translations:
+        return {k: v or "" for k, v in translations.items()}
+    target = run.get("target_lang")
+    return {target: run.get("translation") or ""} if target else {}
+
+
+def _md_cell(text: str) -> str:
+    """Keep a table row on one line and its columns intact."""
+    return " ".join((text or "").split()).replace("|", "\\|")
 
 
 def _runs(chunk) -> list[dict]:
@@ -71,11 +97,10 @@ def export_session(
     sess = db.get(SessionModel, session_id)
     if not sess or sess.user_id != user.id:
         raise HTTPException(404, "Session not found")
-    source_label = LANGUAGE_LABELS.get(sess.source_lang, sess.source_lang)
-    target_label = LANGUAGE_LABELS.get(sess.target_lang, sess.target_lang)
-    direction = f"{source_label} → {target_label}"
-    if getattr(sess, "bidirectional", False):
-        direction += f"（自动识别双语：{target_label}发言译成{source_label}）"
+    plan = session_plan(sess)
+    source_label = _label(plan.main)
+    target_label = _label(plan.reading)
+    direction = _plan_description(plan)
     names = _names(sess)
     segments = db.exec(
         select(Segment)
@@ -95,7 +120,14 @@ def export_session(
             ss = seg.timestamp_ms // 1000 % 60
             who = _speaker(getattr(seg, "speaker", None), names)
             who = f"{who}: " if who else ""
-            lines.append(f"[{mm:02d}:{ss:02d}] {who}{_lang_tag(seg, sess)}{seg.ko_text} | {seg.zh_text or ''}")
+            translations = segment_translations(seg, plan)
+            head = f"[{mm:02d}:{ss:02d}] {who}{_lang_tag(seg, plan, translations)}{seg.ko_text}"
+            if len(translations) == 1:
+                lines.append(f"{head} | {next(iter(translations.values())) or ''}")
+            else:
+                # One line per display language the sentence was translated into.
+                lines.append(head)
+                lines += [f"    {_label(target)}: {text or ''}" for target, text in translations.items()]
         if getattr(sess, "live_outline", None):
             lines += ["", "=== Outline ===", sess.live_outline]
         if polished_chunks:
@@ -108,7 +140,12 @@ def export_session(
                 if runs:
                     for run in runs:
                         who = _speaker(run.get("speaker"), names) or "?"
-                        lines += [f"{who}: {run.get('source', '')}", f"  → {run.get('translation', '')}"]
+                        lines.append(f"{who}: {run.get('source', '')}")
+                        translations = _run_translations(run)
+                        if len(translations) == 1:
+                            lines.append(f"  → {next(iter(translations.values()))}")
+                        else:
+                            lines += [f"  → {_label(target)}: {text}" for target, text in translations.items()]
                 else:
                     lines += [f"{source_label}:", chunk.ko_combined, f"{target_label}:", chunk.zh_polished]
         if sess.notes:
@@ -129,8 +166,9 @@ def export_session(
             "",
             "## Original Transcript",
             "",
-            f"| Time | {source_label} | {target_label} |",
-            "|------|--------|---------|",
+            # One column per display language; a sentence fills the columns of its targets.
+            "| Time | 原文 | " + " | ".join(_label(code) for code in plan.display) + " |",
+            "|------|--------|" + "---------|" * len(plan.display),
         ]
         for seg in segments:
             mm = seg.timestamp_ms // 1000 // 60
@@ -138,7 +176,15 @@ def export_session(
             star = "⭐ " if seg.is_starred else ""
             who = _speaker(getattr(seg, "speaker", None), names)
             who = f"**{who}** " if who else ""
-            lines.append(f"| {mm:02d}:{ss:02d} | {star}{who}{_lang_tag(seg, sess)}{seg.ko_text} | {seg.zh_text or ''} |")
+            translations = segment_translations(seg, plan)
+            cells = [_md_cell(translations.get(code) or "") for code in plan.display]
+            for target in translations:
+                if target not in plan.display:      # a target outside the plan (edited plan / old row)
+                    cells[-1] = (cells[-1] + " " + _md_cell(translations[target] or "")).strip()
+            lines.append(
+                f"| {mm:02d}:{ss:02d} | {star}{who}{_lang_tag(seg, plan, translations)}{_md_cell(seg.ko_text)} | "
+                + " | ".join(cells) + " |"
+            )
 
         if getattr(sess, "live_outline", None):
             lines += ["", "## Outline", "", sess.live_outline]
@@ -153,7 +199,14 @@ def export_session(
                     lines += [""]
                     for run in runs:
                         who = _speaker(run.get("speaker"), names) or "?"
-                        lines += [f"- **{who}**：{run.get('translation', '')}", f"  <br><sub>{run.get('source', '')}</sub>"]
+                        translations = _run_translations(run)
+                        if len(translations) <= 1:
+                            lines.append(f"- **{who}**：{next(iter(translations.values()), run.get('source', ''))}")
+                        else:
+                            first, *others = translations.items()
+                            lines.append(f"- **{who}**：{first[1]}")
+                            lines += [f"  <br>{_label(target)}：{text}" for target, text in others]
+                        lines.append(f"  <br><sub>{run.get('source', '')}</sub>")
                 else:
                     lines += [
                         "",

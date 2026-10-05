@@ -23,7 +23,14 @@ class Session(SQLModel, table=True):
     notes: Optional[str] = None
     # Auto-detect which of the two session languages each utterance is in and
     # translate the other way when the target language is spoken.
+    # Legacy view of the language plan below (source = languages[0], target =
+    # display_languages[0], bidirectional = more than one classroom language).
     bidirectional: bool = Field(default=True)
+    # Language plan, JSON arrays (contract 2026-10-05). NULL on rows saved before it:
+    # backend.languages.session_plan() derives them from the legacy fields.
+    languages: Optional[str] = Field(default=None, sa_type=Text)          # frequent, 1–2, main first
+    extra_languages: Optional[str] = Field(default=None, sa_type=Text)    # occasional, 0–2
+    display_languages: Optional[str] = Field(default=None, sa_type=Text)  # 1–4, reading language first
     live_outline: Optional[str] = Field(default=None, sa_type=Text)   # running 课堂脉络
     speaker_names: Optional[str] = Field(default=None, sa_type=Text)  # JSON {"0": "教授"}
     # OnlineSpeakerTracker.export_state() JSON, so a resumed class keeps its speaker
@@ -62,10 +69,13 @@ class Segment(SQLModel, table=True):
     sequence: int
     timestamp_ms: int
     ko_text: str               # spoken text (legacy column name)
-    zh_text: Optional[str] = None   # translation (legacy column name)
+    zh_text: Optional[str] = None   # translation into the primary target (legacy column name)
     is_starred: bool = False
     lang: Optional[str] = None          # spoken language of this segment
-    target_lang: Optional[str] = None   # language of zh_text
+    target_lang: Optional[str] = None   # language of zh_text (primary target)
+    # JSON {target: translation | null} for every target, in display order; NULL on old
+    # rows (= {target_lang: zh_text}). A failed target is null.
+    translations: Optional[str] = Field(default=None, sa_type=Text)
     speaker: Optional[int] = None       # 0-based online speaker index
     start_ms: Optional[int] = None      # audio time since recording start
     end_ms: Optional[int] = None

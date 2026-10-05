@@ -109,5 +109,65 @@ class ASRLanguageTests(unittest.TestCase):
         self.assertTrue(24000 <= cut <= 27200)
 
 
+class EnglishRussianHallucinationTests(unittest.TestCase):
+    """Forced en/ru recognition of the 10-02 class's non-English clips (design §7)."""
+
+    QUIET = np.full(16000, 0.01, dtype=np.float32)     # RMS 0.01: below the 0.025 low-energy limit
+    LOUD = np.full(16000, 0.1, dtype=np.float32)
+
+    def asr(self, output, language, audio=None):
+        with patch.object(transcriber, "_run_inference", return_value=output):
+            return transcriber.transcribe_audio(self.LOUD if audio is None else audio, language=language)
+
+    def test_quiet_stock_phrases_are_dropped(self):
+        # 01:42 "Thank you." on classroom noise; "Thank you." came out 19 times, "Amen." 3, "Спасибо." 3.
+        for output, language in (("Thank you.", "en"), ("Thank you very much!", "en"), ("you", "en"),
+                                 ("Amen.", "en"), ("Спасибо.", "ru"), ("Всего доброго.", "ru")):
+            with self.subTest(output=output):
+                self.assertEqual(self.asr(output, language, self.QUIET), "")
+        # Said out loud, the same words are kept.
+        self.assertEqual(self.asr("Thank you.", "en"), "Thank you.")
+        self.assertEqual(self.asr("Спасибо.", "ru"), "Спасибо.")
+
+    def test_subtitle_credits_are_dropped_at_any_loudness(self):
+        for output, language in (
+            ("Продолжение следует...", "ru"), ("Субтитры сделал DimaTorzok", "ru"),
+            ("Субтитры подогнал «Симон»", "ru"), ("Редактор субтитров А.Семкин Корректор А.Егорова", "ru"),
+            ("Thank you for watching!", "en"), ("Thank you very much for being here with us today. Thank you.", "en"),
+            ("Subtitles by the Amara.org community", "en"), ("Please subscribe.", "en"),
+        ):
+            with self.subTest(output=output):
+                self.assertEqual(self.asr(output, language), "")
+
+    def test_real_english_and_russian_speech_is_kept(self):
+        for output, language in (
+            ("So one day her mother starts calling her.", "en"),
+            ("They think it will be a problem because they look different.", "en"),
+            ("Okay, so the next slide shows the storyboard.", "en"),
+            ("Сегодня мы обсудим экономику.", "ru"),
+        ):
+            with self.subTest(output=output):
+                self.assertEqual(self.asr(output, language, self.QUIET), output)
+        # A long English sentence may mention subscribing.
+        long_sentence = "Users subscribe to the service and then generate the images they need for the project."
+        self.assertEqual(self.asr(long_sentence, "en"), long_sentence)
+
+    def test_korean_and_chinese_filters_are_unchanged_and_the_korean_supplement_applies(self):
+        # English phrases are only checked for English output.
+        self.assertEqual(self.asr("Okay.", "ko", self.QUIET), "Okay.")
+        self.assertEqual(self.asr("이 시각 세계였습니다.", "ko"), "")
+        self.assertEqual(self.asr("영상편집 박진주", "ko"), "")
+        with patch.object(transcriber.settings, "hallucination_blacklist", ["자막"]):   # a deployment's .env list
+            self.assertEqual(self.asr("오늘 영상은 여기까지입니다", "ko"), "")
+            self.assertEqual(self.asr("자막 제공", "ko"), "")
+        self.assertEqual(self.asr("今天讨论经济学。", "zh"), "今天讨论经济学。")
+
+    def test_polish_re_recognition_uses_the_same_lists(self):
+        self.assertFalse(translator.is_plausible_polish_transcript("Продолжение следует...", "ru"))
+        self.assertFalse(translator.is_plausible_polish_transcript("Thanks for watching!", "en"))
+        self.assertFalse(translator.is_plausible_polish_transcript("字幕由Amara.org社区提供", "zh"))
+        self.assertTrue(translator.is_plausible_polish_transcript("So one day her mother starts calling her.", "en"))
+
+
 if __name__ == "__main__":
     unittest.main()

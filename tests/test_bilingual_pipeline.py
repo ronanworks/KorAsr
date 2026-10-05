@@ -20,7 +20,7 @@ os.environ.setdefault("MOONSHOT_API_KEY", "test-key")
 from backend.api import sessions as sessions_api
 from backend.asr import transcriber
 from backend.asr.langid import choose_language
-from backend.languages import candidate_languages, translation_target
+from backend.languages import candidate_languages, segment_translations, session_plan, translation_target
 from backend.polish import pipeline as pipeline_module
 from backend.polish.translator import PolishResult
 from backend.storage import database
@@ -265,19 +265,19 @@ class SpeakerApiAndMigrationTests(unittest.TestCase):
 
     def test_create_defaults_to_bidirectional_and_speakers_can_be_named(self):
         sess = sessions_api.create_session(sessions_api.SessionCreate(name="L"), self.db, self.user)
-        self.assertTrue(sess.bidirectional)
-        self.db.add(Segment(session_id=sess.id, sequence=0, timestamp_ms=0, ko_text="안녕", speaker=1))
+        self.assertTrue(sess["bidirectional"])
+        self.db.add(Segment(session_id=sess["id"], sequence=0, timestamp_ms=0, ko_text="안녕", speaker=1))
         self.db.commit()
-        result = sessions_api.rename_speaker(sess.id, 1, sessions_api.SpeakerRename(name="  金 教授 "), self.db, self.user)
+        result = sessions_api.rename_speaker(sess["id"], 1, sessions_api.SpeakerRename(name="  金 教授 "), self.db, self.user)
         self.assertEqual(result["speakers"], [{"index": 1, "name": "金 教授", "segment_count": 1}])
-        detail = sessions_api.get_session(sess.id, self.db, self.user)
+        detail = sessions_api.get_session(sess["id"], self.db, self.user)
         self.assertEqual(detail["speakers"], [{"index": 1, "name": "金 教授", "segment_count": 1}])
-        cleared = sessions_api.rename_speaker(sess.id, 1, sessions_api.SpeakerRename(name=""), self.db, self.user)
+        cleared = sessions_api.rename_speaker(sess["id"], 1, sessions_api.SpeakerRename(name=""), self.db, self.user)
         self.assertEqual(cleared["speakers"][0]["name"], None)
         with self.assertRaises(HTTPException):
-            sessions_api.rename_speaker(sess.id, 99, sessions_api.SpeakerRename(name="x"), self.db, self.user)
+            sessions_api.rename_speaker(sess["id"], 99, sessions_api.SpeakerRename(name="x"), self.db, self.user)
         with self.assertRaises(HTTPException):
-            sessions_api.rename_speaker(sess.id, 0, sessions_api.SpeakerRename(name="x" * 30), self.db, self.user)
+            sessions_api.rename_speaker(sess["id"], 0, sessions_api.SpeakerRename(name="x" * 30), self.db, self.user)
 
     def test_old_database_gains_new_columns_without_losing_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -294,11 +294,23 @@ class SpeakerApiAndMigrationTests(unittest.TestCase):
                 database.init_db(old)
             columns = {t: {c["name"] for c in inspect(old).get_columns(t)} for t in ("session", "segment", "polishedchunk")}
             self.assertTrue({"bidirectional", "live_outline", "speaker_names", "speaker_state"} <= columns["session"])
-            self.assertTrue({"lang", "target_lang", "speaker", "start_ms", "end_ms"} <= columns["segment"])
+            self.assertTrue({"languages", "extra_languages", "display_languages"} <= columns["session"])
+            self.assertTrue({"lang", "target_lang", "speaker", "start_ms", "end_ms", "translations"} <= columns["segment"])
             self.assertTrue({"start_ms", "end_ms", "summary", "status", "runs_json"} <= columns["polishedchunk"])
             with old.connect() as conn:
                 self.assertEqual(conn.execute(text("SELECT bidirectional FROM session WHERE id='s1'")).scalar(), 0)
                 self.assertEqual(conn.execute(text("SELECT ko_text FROM segment WHERE id='g1'")).scalar(), "옛")
+                # Not backfilled: old rows keep NULL and are derived when read.
+                plan_columns = conn.execute(text(
+                    "SELECT languages, extra_languages, display_languages FROM session WHERE id='s1'")).one()
+                self.assertEqual(tuple(plan_columns), (None, None, None))
+                self.assertIsNone(conn.execute(text("SELECT translations FROM segment WHERE id='g1'")).scalar())
+            with DBSession(old) as db:
+                sess = db.get(SessionModel, "s1")
+                self.assertEqual(session_plan(sess).as_dict(),
+                                 {"languages": ["ko"], "extra_languages": [], "display_languages": ["zh"]})
+                self.assertEqual(segment_translations(db.get(Segment, "g1"), session_plan(sess)), {"zh": None})
+            database.init_db(old)   # running the migration again changes nothing
             old.dispose()
 
 

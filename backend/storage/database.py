@@ -90,10 +90,15 @@ def _migrate_sqlite(db_engine) -> None:
         for name in ("live_outline", "speaker_names"):
             if name not in columns:
                 connection.execute(text(f"ALTER TABLE session ADD COLUMN {name} TEXT"))
-        _add_missing_columns(connection, "session", {"speaker_state": "TEXT"})
+        # Language plan (2026-10-05). Not backfilled: NULL rows are read through
+        # backend.languages.session_plan / segment_translations, which derive the values.
+        _add_missing_columns(connection, "session", {
+            "speaker_state": "TEXT",
+            "languages": "TEXT", "extra_languages": "TEXT", "display_languages": "TEXT",
+        })
         _add_missing_columns(connection, "segment", {
             "lang": "VARCHAR", "target_lang": "VARCHAR", "speaker": "INTEGER",
-            "start_ms": "INTEGER", "end_ms": "INTEGER",
+            "start_ms": "INTEGER", "end_ms": "INTEGER", "translations": "TEXT",
         })
         _add_missing_columns(connection, "polishedchunk", {
             "start_ms": "INTEGER", "end_ms": "INTEGER", "summary": "TEXT",

@@ -18,6 +18,7 @@ import numpy as np
 from sqlmodel import Session as DBSession, select
 
 from backend.config import settings
+from backend.languages import LanguagePlan, plan_from_legacy
 from backend.materials.context import get_relevant_material_context
 from backend.polish.translator import (
     PolishRun, build_runs, choose_run_text, merge_adjacent_runs, polish_runs, speaker_label, speaker_subruns,
@@ -58,11 +59,15 @@ def parse_speaker_names(raw: str | None) -> dict[str, str]:
 class PolishPipeline:
     def __init__(
         self, session_id: str, source_lang: str, target_lang: str,
-        raw_pcm_path: Path, gpu_sem: asyncio.Semaphore, send=None,
+        raw_pcm_path: Path, gpu_sem: asyncio.Semaphore, send=None, plan: LanguagePlan | None = None,
     ):
+        """plan: the class's language plan; without it the legacy pair (source → target,
+        target speech translated back) applies. Runs take their targets from each sentence's
+        saved translations; key points and the outline use the reading language."""
         self.session_id = session_id
-        self.source_lang = source_lang
-        self.target_lang = target_lang
+        self.plan = plan or plan_from_legacy(source_lang, target_lang, True)
+        self.source_lang = self.plan.main
+        self.target_lang = self.plan.reading
         self.raw_pcm_path = Path(raw_pcm_path)
         self.gpu_sem = gpu_sem
         self.send = send
@@ -344,7 +349,11 @@ class PolishPipeline:
             start_segment_seq=segments[0].sequence,
             end_segment_seq=segments[-1].sequence,
             ko_combined="\n".join(f"{speaker_label(r.speaker, names)}: {r.source}" for r in result.runs),
-            zh_polished="\n".join(f"{speaker_label(r.speaker, names)}: {r.translation}" for r in result.runs),
+            # Legacy column: the primary translation; a run spoken in the only display
+            # language has none, so its own text stands in.
+            zh_polished="\n".join(
+                f"{speaker_label(r.speaker, names)}: {r.translation if r.targets else r.source}" for r in result.runs
+            ),
             start_ms=start_ms,
             end_ms=end_ms,
             summary=result.summary,

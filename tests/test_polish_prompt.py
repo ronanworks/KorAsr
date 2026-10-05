@@ -245,5 +245,129 @@ class PolishCallTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.state, "ok")
 
 
+ENGLISH = "So one day her mother starts calling her."
+
+
+def _multi_segments():
+    """A ko→zh / en→zh+ko minute as saved by the live handler (translations JSON per row)."""
+    return [
+        _seg(0, 0, 3000, "오늘은 광합성을 설명합니다.", "今天说明光合作用。"),
+        SimpleNamespace(
+            sequence=1, timestamp_ms=3200, start_ms=3200, end_ms=6000, ko_text=ENGLISH, zh_text="有一天她妈妈开始给她打电话。",
+            lang="en", target_lang="zh", speaker=1,
+            translations='{"zh": "有一天她妈妈开始给她打电话。", "ko": "어느 날 엄마가 전화하기 시작했어요."}',
+        ),
+        SimpleNamespace(
+            sequence=2, timestamp_ms=6100, start_ms=6100, end_ms=8000, ko_text="But she never came back.",
+            zh_text="但她再也没有回来。", lang="en", target_lang="zh", speaker=1,
+            translations='{"zh": "但她再也没有回来。", "ko": null}',
+        ),
+    ]
+
+
+class MultiTargetPolishTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.delay = patch.object(translator, "LLM_RETRY_DELAY_S", 0)
+        self.delay.start()
+        self.addCleanup(self.delay.stop)
+
+    def test_runs_keep_every_targets_live_translation(self):
+        runs = build_runs(_multi_segments(), "ko", "zh")
+        self.assertEqual([(r.lang, r.targets, r.target_lang) for r in runs], [("ko", ["zh"], "zh"), ("en", ["zh", "ko"], "zh")])
+        english = runs[1]
+        self.assertEqual(english.realtime_translations, {
+            "zh": "有一天她妈妈开始给她打电话。 但她再也没有回来。", "ko": "어느 날 엄마가 전화하기 시작했어요.",
+        })
+        self.assertEqual(english.realtime_translation, english.realtime_translations["zh"])
+        english.translation = "精修"
+        english.translations = {"zh": "精修", "ko": "다듬은 번역"}
+        self.assertEqual(english.as_dict()["targets"], ["zh", "ko"])
+        self.assertEqual(english.as_dict()["translations"], {"zh": "精修", "ko": "다듬은 번역"})
+        # Runs of the old shape (one target) still serialise both ways.
+        self.assertEqual(_run("네").as_dict()["translations"], {"zh": ""})
+
+    def test_prompt_asks_for_one_line_per_target_only_when_needed(self):
+        runs = build_runs(_multi_segments(), "ko", "zh")
+        system, user = (m["content"] for m in build_polish_messages(runs, summary_lang="zh"))
+        self.assertIn("[1] 译成中文｜说话人1\n오늘은", user)
+        self.assertIn(f"[2] 译成中文、韩语｜说话人2\n{ENGLISH}", user)
+        self.assertIn("[3|zh]", system)
+        self.assertIn("zh=中文、ko=韩语", system)
+        self.assertIn("用中文写本分钟要点", system)
+        single = build_polish_messages([_run("오늘은 광합성을 설명합니다.")], summary_lang="zh")[0]["content"]
+        self.assertEqual(single, translator.build_polish_system_prompt("zh"))
+        self.assertNotIn("语言代码", single)
+
+    def test_runs_in_the_only_display_language_are_marked(self):
+        run = PolishRun(speaker=0, lang="zh", target_lang=None, start_ms=0, end_ms=1000,
+                        realtime_source="然后教授的话呢", realtime_translation="", source="然后教授的话呢")
+        self.assertEqual(run.targets, [])
+        system, user = (m["content"] for m in build_polish_messages([run], summary_lang="zh"))
+        self.assertIn("[1] 无需翻译｜说话人1\n然后教授的话呢", user)
+        self.assertIn("“无需翻译”的段落不输出译文", system)
+
+    def test_coded_lines_are_parsed_and_uncoded_ones_belong_to_the_primary_target(self):
+        output = (
+            "[1] 今天讲光合作用。\n"
+            "[2|zh] 有一天，她妈妈开始给她打电话。\n"
+            "她再也没有回来。\n"
+            "[2｜KO] 어느 날 엄마가 전화하기 시작했어요.\n"
+            "[3] 译成中文、韩语｜说话人2：好的\n"
+            "要点：\n- 报告开始"
+        )
+        parsed, summary = translator.parse_polish_targets(output, 3)
+        self.assertEqual(parsed, {
+            (1, None): "今天讲光合作用。",
+            (2, "zh"): "有一天，她妈妈开始给她打电话。 她再也没有回来。",
+            (2, "ko"): "어느 날 엄마가 전화하기 시작했어요.",
+            (3, None): "好的",
+        })
+        self.assertEqual(summary, "- 报告开始")
+        self.assertEqual(parse_polish_output(output, 3)[0][2], "有一天，她妈妈开始给她打电话。 她再也没有回来。")
+
+    async def test_each_target_falls_back_on_its_own(self):
+        # zh accepted; ko came back in English (untranslated) → the live Korean translation.
+        client = _FakeClient([
+            "[1] 今天讲光合作用。\n"
+            "[2|zh] 有一天她妈妈开始给她打电话，但她再也没有回来。\n"
+            "[2|ko] One day her mother starts calling her.\n"
+            "要点：\n- 学生的英语报告"
+        ])
+        runs = build_runs(_multi_segments(), "ko", "zh")
+        with patch.object(translator, "get_client", return_value=client):
+            result = await polish_runs(runs, summary_lang="zh")
+        english = result.runs[1]
+        self.assertEqual(english.translations, {
+            "zh": "有一天她妈妈开始给她打电话，但她再也没有回来。", "ko": "어느 날 엄마가 전화하기 시작했어요.",
+        })
+        self.assertEqual(english.translation, english.translations["zh"])
+        self.assertEqual(result.state, "ok")            # 2 of 3 targets polished
+        self.assertEqual(result.summary, "- 学生的英语报告")
+        # Output budget grows with the number of targets (one line each).
+        source_chars = sum(len(r.source) for r in runs)
+        weighted = len(runs[0].source) + 2 * len(runs[1].source)
+        self.assertEqual(client.calls[0]["max_tokens"], max(400, 2 * weighted + 300))
+        self.assertGreater(weighted, source_chars)
+
+    async def test_an_uncoded_line_for_a_multi_target_run_is_the_primary_translation(self):
+        client = _FakeClient(["[1] 今天讲光合作用。\n[2] 有一天她妈妈开始给她打电话。\n要点：\n- 要点"])
+        runs = build_runs(_multi_segments(), "ko", "zh")
+        with patch.object(translator, "get_client", return_value=client):
+            result = await polish_runs(runs, summary_lang="zh")
+        english = result.runs[1]
+        self.assertEqual(english.translations["zh"], "有一天她妈妈开始给她打电话。")
+        self.assertEqual(english.translations["ko"], "어느 날 엄마가 전화하기 시작했어요.")   # live fallback
+
+    async def test_a_minute_with_nothing_to_translate_still_gets_key_points(self):
+        run = PolishRun(speaker=0, lang="zh", target_lang=None, start_ms=0, end_ms=1000,
+                        realtime_source="然后教授的话呢", realtime_translation="", source="然后教授的话呢")
+        client = _FakeClient(["要点：\n- 助教在转述教授的话"])
+        with patch.object(translator, "get_client", return_value=client):
+            result = await polish_runs([run], summary_lang="zh")
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual((result.state, result.summary), ("ok", "- 助教在转述教授的话"))
+        self.assertEqual((result.runs[0].translation, result.runs[0].as_dict()["translations"]), ("", {}))
+
+
 if __name__ == "__main__":
     unittest.main()

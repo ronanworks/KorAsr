@@ -53,21 +53,73 @@ ZH_HALLUCINATION_BLACKLIST = (
     # "请不吝点赞 订阅 转发 打赏支持明镜与点点栏目"，所以 zh 默认不加提示词。
 )
 
+# Korean TV-caption hallucinations seen when the 10-02 class's discarded clips were
+# re-recognised (data/eval/2026-10-05/multilang §7: 1–2 times each). Always applied in
+# addition to settings.hallucination_blacklist, which a deployment's .env replaces.
+KO_HALLUCINATION_SUPPLEMENT = (
+    "이 시각 세계", "날씨였습니다", "영상편집", "자료조사", "오늘 영상은 여기까지", "도움이 되시길 바랍니다",
+)
 
-def _prompt_for(language: str) -> str:
-    if language == "ko":
-        return settings.asr_initial_prompt
-    if language == "zh":
-        return settings.asr_initial_prompt_zh
-    return ""
+# English / Russian subtitle-credit hallucinations (design §7 and openai/whisper
+# discussions #928, #1873). Forcing en/ru on the 10-02 class's non-English clips gave
+# "Продолжение следует..." 20×, "Субтитры сделал DimaTorzok" 9×, "Субтитры подогнал «Симон»" 3×.
+# Matched case-insensitively in short outputs only, like the Korean list.
+EN_HALLUCINATION_BLACKLIST = (
+    "thank you for watching", "thanks for watching", "subscribe", "amara.org", "subtitles by",
+    "transcription by", "castingwords", "thank you very much for being here", "see you next time",
+)
+RU_HALLUCINATION_BLACKLIST = (
+    "продолжение следует", "субтитр", "dimatorzok", "редактор", "корректор", "симон",
+    "спасибо за просмотр", "подписывайтесь", "до новых встреч",
+    "благодарю за внимание", "благодарю вас за внимание",
+)
+# Only outputs up to this many characters are checked against the blacklist (Korean and
+# Chinese: < 45 as before). Latin/Cyrillic credits run longer: the observed ones are
+# "Thank you very much for being here with us today. Thank you." (60) and
+# "Редактор субтитров А.Семкин Корректор А.Егорова" (48).
+_SHORT_OUTPUT_MAX_CHARS = {"en": 60, "ru": 60}
+_DEFAULT_SHORT_OUTPUT_MAX_CHARS = 44
+_CASELESS_BLACKLIST_LANGUAGES = frozenset({"en", "ru"})
+
+# Whole English/Russian outputs that are noise hallucinations when the audio is quiet
+# (forced en/ru on the 10-02 class: "Thank you." 19×, "Thank you very much." 5×,
+# "Amen." 3×, "Спасибо." 3×). Compared without case and final punctuation, en/ru only,
+# so Korean/Chinese results are exactly as before.
+LOW_ENERGY_PHRASES_BY_LANGUAGE = {
+    "en": frozenset({
+        "thank you", "thank you very much", "thank you all", "okay", "all right", "bye", "you", "oh", "amen",
+    }),
+    "ru": frozenset({"спасибо", "извините", "всего доброго", "пока", "ой"}),
+}
+_FINAL_PUNCT_RE = re.compile(r"[\s.!?…,。！？]+$")
+
+# Initial prompts per language; English and Russian have none (no A/B evidence yet).
+_PROMPT_SETTINGS = {"ko": "asr_initial_prompt", "zh": "asr_initial_prompt_zh"}
+
+
+def initial_prompt_for(language: str) -> str:
+    name = _PROMPT_SETTINGS.get(language)
+    return getattr(settings, name) if name else ""
 
 
 def _blacklist_for(language: str):
     if language == "ko":
-        return settings.hallucination_blacklist
+        return tuple(settings.hallucination_blacklist) + KO_HALLUCINATION_SUPPLEMENT
     if language == "zh":
         return ZH_HALLUCINATION_BLACKLIST
+    if language == "en":
+        return EN_HALLUCINATION_BLACKLIST
+    if language == "ru":
+        return RU_HALLUCINATION_BLACKLIST
     return ()
+
+
+def blacklist_hits(text: str, language: str) -> list[str]:
+    """Blacklisted phrases in a short output (long outputs may legitimately contain them)."""
+    if len(text) > _SHORT_OUTPUT_MAX_CHARS.get(language, _DEFAULT_SHORT_OUTPUT_MAX_CHARS):
+        return []
+    haystack = text.casefold() if language in _CASELESS_BLACKLIST_LANGUAGES else text
+    return [phrase for phrase in _blacklist_for(language) if phrase in haystack]
 
 
 def _looks_repetitive(text: str) -> bool:
@@ -144,7 +196,7 @@ def strip_repeated_boundary(previous: str, current: str, language: str) -> str:
     return current
 
 
-def _is_low_energy_common_hallucination(text: str, rms: float) -> bool:
+def _is_low_energy_common_hallucination(text: str, rms: float, language: str | None = None) -> bool:
     """低能量音频 + 输出恰好是常见短语 = 几乎肯定是幻觉。
 
     高能量时的同一短语（用户真的说了"감사합니다"）允许通过。
@@ -153,6 +205,9 @@ def _is_low_energy_common_hallucination(text: str, rms: float) -> bool:
         return True
     if rms > LOW_ENERGY_HALLUCINATION_RMS:
         return False
+    phrases = LOW_ENERGY_PHRASES_BY_LANGUAGE.get(language or "")
+    if phrases and _FINAL_PUNCT_RE.sub("", text.strip()).casefold() in phrases:
+        return True
     return text.strip() in COMMON_HALLUCINATION_PHRASES
 
 
@@ -221,7 +276,11 @@ def _run_inference_mlx(audio: np.ndarray, prompt: str, beam_size: int, language:
 
 
 def _run_inference(audio: np.ndarray, prompt: str, beam_size: int, language: str) -> str:
-    """根据语言和 settings.asr_backend 分发：普通话优先 SenseVoice，其余走 Whisper。"""
+    """根据语言和 settings.asr_backend 分发：普通话优先 SenseVoice，其余走 Whisper。
+
+    English and Russian stay on Whisper: SenseVoice has no Russian, and there is no
+    evidence yet that it does better on classroom English.
+    """
     if language == "zh":
         text = sensevoice.transcribe(audio)
         # Empty on a clip of 1 s or more: let Whisper have a try before dropping it.
@@ -250,7 +309,7 @@ def transcribe_audio(
     """
     if language not in ASR_LANGUAGES:
         raise ValueError(f"Unsupported ASR language: {language}")
-    prompt = initial_prompt.strip() if initial_prompt is not None else _prompt_for(language)
+    prompt = initial_prompt.strip() if initial_prompt is not None else initial_prompt_for(language)
 
     duration = len(audio) / SAMPLE_RATE
     rms = float(np.sqrt(np.mean(audio**2))) if len(audio) else 0.0
@@ -291,16 +350,15 @@ def transcribe_audio(
         print(f"[ASR {mode}] DROPPED (degenerate loop/laughter): {ascii(text[:60])}")
         return ""
 
-    # 3) 低能量 + 常见短语精确匹配：噪声段被吐 '감사합니다.' / '네' 这种
-    if _is_low_energy_common_hallucination(text, rms):
+    # 3) 低能量 + 常见短语精确匹配：噪声段被吐 '감사합니다.' / '네' / 'Thank you.' 这种
+    if _is_low_energy_common_hallucination(text, rms, language):
         print(f"[ASR {mode}] DROPPED (low-energy hallucination, rms={rms:.4f}): {ascii(text)}")
         return ""
 
     # 4) 长文本黑名单：YouTube/TV 类固定幻觉
     # 长文本可能合法包含这些词，所以只过滤短的。
-    blacklist = _blacklist_for(language)
-    if len(text) < 45 and any(w in text for w in blacklist):
-        hit = [w for w in blacklist if w in text]
+    hit = blacklist_hits(text, language)
+    if hit:
         print(f"[ASR {mode}] DROPPED by blacklist {ascii(hit)}: {ascii(text)}")
         return ""
     return text
@@ -385,7 +443,7 @@ class Transcriber:
         }
 
     def transcribe(self, initial_prompt: str | None = None) -> str:
-        """对当前缓冲区执行 Whisper 推理，返回韩语文本"""
+        """对当前缓冲区按 self.language 执行识别，返回该语言的文本"""
         if len(self.audio_buffer) == 0:
             return ""
         return transcribe_audio(self.audio_buffer.copy(), initial_prompt=initial_prompt, language=self.language)

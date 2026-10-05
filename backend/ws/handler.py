@@ -15,7 +15,7 @@ from sqlalchemy import update
 
 from backend.asr.transcriber import Transcriber, strip_repeated_boundary, transcribe_audio
 from backend.asr.langid import detect_language
-from backend.languages import candidate_languages, translation_target
+from backend.languages import segment_translations, session_plan
 from backend.translation.moonshot import fragment_hint, sanitize_translation, translate_stream
 from backend.polish.pipeline import PolishPipeline, SpeakerHooks, parse_speaker_names
 from backend.speaker.embedding import get_embedder, speech_duration_s
@@ -249,8 +249,9 @@ def _translation_hints(
     About a minute of earlier sentences lets the translator resolve references and
     fix near-homophone ASR errors (10-02: 비염구조 for 비용 구조 was translated
     literally with two sentences of context). Previous items carry their own
-    languages because a bidirectional class mixes directions:
-    (spoken_lang, spoken, translated_lang, translation).
+    languages because a class mixes directions:
+    (spoken_lang, spoken, primary_lang, primary_translation, {target: translation}).
+    _previous_for_target() picks the translation each target's prompt shows.
     """
     with DBSession(engine) as db:
         query = select(Segment).where(Segment.session_id == session_id, Segment.sequence < sequence)
@@ -270,11 +271,56 @@ def _translation_hints(
             .limit(1)
         ).first()
     previous_items = [
-        (row.lang, row.ko_text, row.target_lang, row.zh_text or "") if row.lang else (row.ko_text, row.zh_text or "")
+        (row.lang, row.ko_text, row.target_lang, row.zh_text or "", segment_translations(row))
         for row in reversed(previous)
     ]
     glossary = [(row.source, row.target) for row in terms]
     return previous_items, glossary, _topic_hint(sess, last_summary)
+
+
+def _previous_for_target(items, target: str) -> list[tuple]:
+    """Earlier sentences for the prompt of one target language.
+
+    An earlier sentence that was also translated into `target` shows that translation
+    (an English question followed by Korean speech: the Korean prompt sees the Korean
+    rendering); otherwise its primary translation, as before. Rows without a language
+    (saved before bidirectional classes) keep the old (spoken, translation) shape.
+    """
+    pairs = []
+    for item in items:
+        if len(item) != 5:
+            pairs.append(item)   # already a (spoken, translation) or 4-tuple context item
+            continue
+        lang, spoken, primary_lang, primary_text, translations = item
+        if not lang:
+            pairs.append((spoken, primary_text))
+            continue
+        same_target = (translations or {}).get(target)
+        if same_target:
+            pairs.append((lang, spoken, target, same_target))
+        else:
+            pairs.append((lang, spoken, primary_lang, primary_text))
+    return pairs
+
+
+def _glossary_for(glossary, spoken_lang: str, plan, text: str) -> list[tuple[str, str]]:
+    """Orient the session glossary (written main-language term = reading-language term).
+
+    Main-language speech uses it as written, reading-language speech reversed (as
+    before). A third language (English in a Korean→Chinese class) gets only the
+    entries whose either side was spoken, spoken side first.
+    """
+    if spoken_lang == plan.main:
+        return list(glossary)
+    if spoken_lang == plan.reading:
+        return [(target, source) for source, target in glossary]
+    oriented = []
+    for source, target in glossary:
+        if source and source in text:
+            oriented.append((source, target))
+        elif target and target in text:
+            oriented.append((target, source))
+    return oriented
 
 
 def _same_text(a: str, b: str) -> bool:
@@ -312,13 +358,15 @@ async def handle_ws(websocket: WebSocket, session_id: str):
             await websocket.close(code=4009, reason="Session already ended")
             return
         session_user_id = session.user_id
-        source_lang = session.source_lang
-        target_lang = session.target_lang
-        bidirectional = bool(getattr(session, "bidirectional", False))
+        # Old rows without the plan columns mean their legacy source/target/bidirectional.
+        plan = session_plan(session)
 
-    # Speech in the target language (e.g. Chinese in a Korean→Chinese class) is
-    # detected per utterance and translated back into the source language.
-    candidates = candidate_languages(source_lang, target_lang, bidirectional)
+    # Each utterance is recognised in one of the class's languages: the frequent ones
+    # as before (e.g. Chinese in a Korean→Chinese class), occasional ones only on clear
+    # evidence; it is then translated into every other display language.
+    source_lang = plan.main
+    candidates = plan.frequent
+    extra_languages = plan.extra
     transcriber = Transcriber(language=source_lang)
 
     await _wait_for_dropped_connection(session_id)
@@ -373,7 +421,7 @@ async def handle_ws(websocket: WebSocket, session_id: str):
             _release_unstarted_claim(session_id, session_user_id, "paused")
 
     try:
-        polish = PolishPipeline(session_id, source_lang, target_lang, raw_pcm_path, _gpu_sem, _safe_send)
+        polish = PolishPipeline(session_id, plan.main, plan.reading, raw_pcm_path, _gpu_sem, _safe_send, plan=plan)
         speaker_tracker = (
             OnlineSpeakerTracker.from_settings() if hasattr(OnlineSpeakerTracker, "from_settings")
             else OnlineSpeakerTracker()
@@ -407,10 +455,10 @@ async def handle_ws(websocket: WebSocket, session_id: str):
     # Start time of finals still being recognised/translated. The polish window
     # must end before them so every sentence it reads is already in the DB.
     inflight_starts: dict[str, int] = {}
-    if len(candidates) == 1:
+    if len(plan.spoken) == 1:
         last_lang: str | None = source_lang
     else:
-        last_lang = resume["last_lang"] if resume and resume["last_lang"] in candidates else None
+        last_lang = resume["last_lang"] if resume and resume["last_lang"] in plan.spoken else None
     # A pause is a real gap: no speaker continuity across it.
     last_speaker_end_ms: int | None = None
     # Boundary de-duplication after a forced cut: the last final text per language.
@@ -465,14 +513,14 @@ async def handle_ws(websocket: WebSocket, session_id: str):
 
     def _recognize(audio: np.ndarray, fast: bool, previous: str | None):
         """Language ID + Whisper in one worker-thread call (one GPU slot)."""
-        decision = detect_language(audio, candidates, previous)
+        decision = detect_language(audio, candidates, previous, extra=extra_languages)
+        probs = {code: round(float(decision.probs.get(code, 0.0)), 3) for code in plan.spoken}
         if decision.language is None:
-            probs = {code: round(float(decision.probs.get(code, 0.0)), 3) for code in candidates}
             print(f"[LangID] {'interim' if fast else 'final'} dur={len(audio)/16000:.2f}s {probs} -> not speech in session languages")
             return None, ""
         text = transcribe_audio(audio, fast=fast, initial_prompt=None, language=decision.language)
-        if len(candidates) > 1 and not fast:
-            print(f"[LangID] final dur={len(audio)/16000:.2f}s share={decision.share:.2f} -> {decision.language}")
+        if len(plan.spoken) > 1 and not fast:
+            print(f"[LangID] final dur={len(audio)/16000:.2f}s share={decision.share:.2f} {probs} -> {decision.language}")
         return decision.language, text
 
     async def _announce_speakers(count: int) -> None:
@@ -543,7 +591,10 @@ async def handle_ws(websocket: WebSocket, session_id: str):
                 await _safe_send({"id": seg_id, "status": "remove"})
             return
         last_lang = lang
-        seg_target = translation_target(lang, source_lang, target_lang)
+        # Every display language except the spoken one, in display order; the first is
+        # the primary target that the legacy target_lang / zh_text / "zh" fields carry.
+        targets = plan.targets(lang)
+        seg_target = targets[0] if targets else None
         try:
             speaker = await _assign_speaker(audio, start_ms, end_ms)
         except Exception as exc:
@@ -552,10 +603,11 @@ async def handle_ws(websocket: WebSocket, session_id: str):
             speaker = None
         meta = {
             "timestamp_ms": start_ms, "start_ms": start_ms, "end_ms": end_ms,
-            "lang": lang, "target_lang": seg_target, "speaker": speaker,
+            "lang": lang, "target_lang": seg_target, "targets": targets, "speaker": speaker,
         }
 
         # 先保存 ASR 结果。WebSocket 断开或翻译超时都不能丢掉已识别的原文。
+        # Targets start as null (= not translated) so a crash leaves them marked failed.
         with DBSession(engine) as db:
             seg = Segment(
                 id=seg_id, session_id=s_id,
@@ -563,6 +615,7 @@ async def handle_ws(websocket: WebSocket, session_id: str):
                 ko_text=ko, zh_text=None,
                 lang=lang, target_lang=seg_target, speaker=speaker,
                 start_ms=start_ms, end_ms=end_ms,
+                translations=json.dumps({target: None for target in targets}, ensure_ascii=False),
             )
             db.add(seg)
             sess = db.get(SessionModel, s_id)
@@ -572,19 +625,35 @@ async def handle_ws(websocket: WebSocket, session_id: str):
 
         rolling_context = _append_context(rolling_context, ko)
 
-        if send_ws:
-            send_ws = await _safe_send({"id": seg_id, "status": "translating", "ko": ko, "zh": "翻译中...", **meta})
+        # Every message carries the full snapshot of all targets (contract 2026-10-05 §2).
+        partial = {target: "" for target in targets}
+        state = {target: "translating" for target in targets}
+        push = {"send": send_ws, "last": time.time()}
 
-        # 流式翻译：边收 token 边推 WS；节流：每 100ms 最多推一次
+        def _message(status: str, zh: str, translations: dict | None = None) -> dict:
+            return {
+                "id": seg_id, "status": status, "ko": ko, "zh": zh, **meta,
+                "translations": dict(partial if translations is None else translations),
+                "translation_state": dict(state),
+            }
+
+        if not targets:
+            # Spoken in the only display language: nothing to translate.
+            if push["send"]:
+                await _safe_send(_message("done", ""))
+            return
+
+        if push["send"]:
+            push["send"] = await _safe_send(_message("translating", "翻译中..."))
+
+        # 流式翻译：每个目标语言一个并行调用，边收 token 边推 WS；节流：每 100ms 最多推一次，带所有目标
         try:
             previous_items, glossary, topic = await asyncio.to_thread(_translation_hints, s_id, seq_num, start_ms)
         except Exception as e:
             print(f"[WS final ] seg={seg_id[:8]} context lookup failed: {type(e).__name__}: {e}")
             previous_items, glossary, topic = [], [], ""
         hint = fragment_hint(continuation, ends_forced, lang, ko)
-        if lang != source_lang:
-            # The glossary is written source→target; reversed speech uses it backwards.
-            glossary = [(target, source) for source, target in glossary]
+        glossary = _glossary_for(glossary, lang, plan, ko)
         try:
             material_context = await asyncio.to_thread(
                 get_relevant_material_context, s_id, ko, 800
@@ -592,48 +661,61 @@ async def handle_ws(websocket: WebSocket, session_id: str):
         except Exception as exc:
             print(f"[WS final ] seg={seg_id[:8]} material lookup failed: {type(exc).__name__}: {exc}")
             material_context = ""
-        zh_acc = ""
-        translation_complete = False
-        last_push = time.time()
-        try:
+
+        async def _push_progress() -> None:
+            now = time.time()
+            if not push["send"] or now - push["last"] < TRANSLATION_PUSH_MIN_INTERVAL:
+                return
+            push["last"] = now
+            push["send"] = await _safe_send(_message("translating", partial[seg_target] or "翻译中..."))
+
+        async def _translate(target: str) -> str:
+            text = ""
             async with asyncio.timeout(90):
                 async for delta in translate_stream(
-                    ko, previous_items, glossary, lang, seg_target, material_context, topic, hint,
+                    ko, _previous_for_target(previous_items, target), glossary, lang, target,
+                    material_context, topic, hint,
                 ):
-                    zh_acc += delta
-                    now = time.time()
-                    if send_ws and now - last_push >= TRANSLATION_PUSH_MIN_INTERVAL:
-                        send_ws = await _safe_send({
-                            "id": seg_id, "status": "translating", "ko": ko, "zh": zh_acc, **meta,
-                        })
-                        last_push = now
-            translation_complete = True
-        except Exception as e:
-            # Already streamed text was provisional; never persist a truncated
-            # translation as a confirmed sentence.
-            print(f"[WS final ] seg={seg_id[:8]} translation failed: {type(e).__name__}: {e}")
+                    text += delta
+                    partial[target] = text
+                    await _push_progress()
+            return text
 
-        if translation_complete and zh_acc:
+        push["last"] = time.time()
+        results = await asyncio.gather(*(_translate(target) for target in targets), return_exceptions=True)
+
+        translations: dict[str, str | None] = {}
+        for target, result in zip(targets, results):
+            if isinstance(result, BaseException):
+                # Already streamed text was provisional; never persist a truncated
+                # translation as a confirmed sentence.
+                print(f"[WS final ] seg={seg_id[:8]} translation to {target} failed: {type(result).__name__}: {result}")
+                result = ""
             # The model sometimes explains an unintelligible clip instead of translating it.
-            cleaned = sanitize_translation(ko, zh_acc, lang, seg_target)
-            if not _same_text(cleaned, zh_acc):
-                print(f"[WS final ] seg={seg_id[:8]} translation replaced: {len(zh_acc)} chars -> {ascii(cleaned[:40])}")
-            zh_acc = cleaned
+            cleaned = sanitize_translation(ko, result, lang, target) if result else ""
+            if result and not _same_text(cleaned, result):
+                print(f"[WS final ] seg={seg_id[:8]} translation to {target} replaced: {len(result)} chars -> {ascii(cleaned[:40])}")
+            translations[target] = cleaned or None
+            partial[target] = cleaned
+            state[target] = "done" if cleaned else "error"
+
+        primary_text = translations[seg_target]
+        if any(translations.values()):
             with DBSession(engine) as db:
                 seg = db.get(Segment, seg_id)
                 if seg:
-                    seg.zh_text = zh_acc
+                    seg.zh_text = primary_text
+                    seg.translations = json.dumps(translations, ensure_ascii=False)
                     db.commit()
 
         # DB 更新完成后才推终态。发送失败只影响在线展示，不影响历史记录。
-        if send_ws:
-            await _safe_send({
-                "id": seg_id,
-                "status": "done" if translation_complete and zh_acc else "error",
-                "ko": ko,
-                "zh": zh_acc if translation_complete and zh_acc else "翻译暂不可用",
-                **meta,
-            })
+        # done = at least one target translated (failed ones are "error" in translation_state).
+        if push["send"]:
+            await _safe_send(_message(
+                "done" if any(translations.values()) else "error",
+                primary_text or "翻译暂不可用",
+                translations,
+            ))
 
     def _schedule_final(audio, seg_id, span, seq_num, context, send_ws=True, continuation=False, ends_forced=False):
         inflight_starts[seg_id] = span[0]
@@ -702,7 +784,8 @@ async def handle_ws(websocket: WebSocket, session_id: str):
             f"[WS] Session {session_id} "
             f"{f'resumed at {recorded_samples // SAMPLE_RATE}s' if resuming else 'connected'}; "
             f"raw PCM -> {ascii(str(raw_pcm_path))}; "
-            f"languages={'/'.join(candidates)} speakers={'on' if embedder else 'off'}"
+            f"languages={'/'.join(candidates)} extra={'/'.join(extra_languages) or '-'} "
+            f"display={'/'.join(plan.display)} speakers={'on' if embedder else 'off'}"
         )
         if embedder is not None:
             # Per-minute diarization shares this tracker, so its corrections keep the same numbers.
@@ -767,12 +850,14 @@ async def handle_ws(websocket: WebSocket, session_id: str):
                         async with _gpu_sem:
                             lang, txt = await asyncio.to_thread(_recognize, audio, True, last_lang)
                         if txt:
+                            interim_targets = plan.targets(lang)
                             await _safe_send({
                                 "id": seg_id, "status": "interim",
                                 "ko": txt + "...", "zh": "识别中...",
                                 "timestamp_ms": interim_ts, "start_ms": interim_ts,
                                 "lang": lang,
-                                "target_lang": translation_target(lang, source_lang, target_lang),
+                                "target_lang": interim_targets[0] if interim_targets else None,
+                                "targets": interim_targets,
                                 "speaker": None,
                             })
 

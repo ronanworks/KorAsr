@@ -15,7 +15,9 @@ from backend.storage.models import Session as SessionModel, Segment, PolishedChu
 from backend.storage.raw_audio import RAW_AUDIO_DIR, recording_duration_seconds
 from backend.summary.generator import generate_summary
 from backend.auth import current_user
-from backend.languages import is_valid_pair
+from backend.languages import (
+    LanguagePlan, is_valid_pair, plan_from_legacy, segment_translations, session_plan, validate_plan,
+)
 from backend.api.materials import stage_session_materials
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -35,12 +37,21 @@ class GlossaryReplace(BaseModel):
     terms: list[GlossaryTermInput]
 
 
+PLAN_FIELDS = ("languages", "extra_languages", "display_languages")
+
+
 class SessionCreate(BaseModel):
     name: str
     glossary_terms: list[GlossaryTermInput] = PydanticField(default_factory=list)
+    # Legacy direction fields; used only when no plan field is given.
     source_lang: str = "ko"
     target_lang: str = "zh"
     bidirectional: bool = True
+    # Language plan (docs/dev/2026-10-05-contract-multilang.md). Any of them given →
+    # the plan decides and the legacy fields are recomputed from it.
+    languages: Optional[list[str]] = None           # frequent, 1–2, main language first
+    extra_languages: Optional[list[str]] = None     # occasional, 0–2
+    display_languages: Optional[list[str]] = None   # 1–4, reading language first
 
 
 class SessionUpdate(BaseModel):
@@ -49,6 +60,9 @@ class SessionUpdate(BaseModel):
     source_lang: Optional[str] = None
     target_lang: Optional[str] = None
     bidirectional: Optional[bool] = None
+    languages: Optional[list[str]] = None
+    extra_languages: Optional[list[str]] = None
+    display_languages: Optional[list[str]] = None
 
 
 class SpeakerRename(BaseModel):
@@ -102,6 +116,42 @@ def _glossary_response(rows: list[GlossaryTerm]) -> dict:
     return {"terms": [{"source": row.source, "target": row.target} for row in rows]}
 
 
+def _has_plan_fields(body) -> bool:
+    return any(getattr(body, name, None) is not None for name in PLAN_FIELDS)
+
+
+def _validated_plan(languages, extra_languages, display_languages) -> LanguagePlan:
+    try:
+        return validate_plan(languages, extra_languages, display_languages)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
+def _plan_with(body, base: LanguagePlan) -> LanguagePlan:
+    """Plan fields from the request; the missing ones keep `base`."""
+    return _validated_plan(
+        body.languages if body.languages is not None else list(base.frequent),
+        body.extra_languages if body.extra_languages is not None else list(base.extra),
+        body.display_languages if body.display_languages is not None else list(base.display),
+    )
+
+
+def _session_response(sess: SessionModel) -> dict:
+    """Session as JSON: the plan as arrays (derived for old rows), never speaker_state."""
+    data = sess.model_dump()
+    data.update(session_plan(sess).as_dict())
+    return data
+
+
+def _segment_response(seg: Segment, plan: LanguagePlan) -> dict:
+    """Segment as JSON with its translations parsed ({target_lang: zh_text} for old rows)."""
+    data = seg.model_dump()
+    translations = segment_translations(seg, plan)
+    data["translations"] = translations
+    data["targets"] = list(translations)
+    return data
+
+
 def owned_session(db: DBSession, session_id: str, user: User) -> SessionModel:
     sess = db.get(SessionModel, session_id)
     if sess is None or sess.user_id != user.id:
@@ -122,14 +172,16 @@ def _recording_file(sess: SessionModel) -> Path:
 
 @router.post("", status_code=201)
 def create_session(body: SessionCreate, db: DBSession = Depends(get_db), user: User = Depends(current_user)):
-    if not is_valid_pair(body.source_lang, body.target_lang):
-        raise HTTPException(422, "Unsupported translation direction")
+    legacy = plan_from_legacy(body.source_lang, body.target_lang, body.bidirectional)
+    if _has_plan_fields(body):
+        plan = _plan_with(body, legacy)
+    else:
+        # Old clients: the pair is validated as before and the plan derived from it.
+        if not is_valid_pair(body.source_lang, body.target_lang):
+            raise HTTPException(422, "Unsupported translation direction")
+        plan = legacy
     terms = _clean_glossary(body.glossary_terms)
-    sess = SessionModel(
-        name=body.name, user_id=user.id,
-        source_lang=body.source_lang, target_lang=body.target_lang,
-        bidirectional=body.bidirectional,
-    )
+    sess = SessionModel(name=body.name, user_id=user.id, **plan.column_values())
     try:
         db.add(sess)
         db.flush()
@@ -145,7 +197,7 @@ def create_session(body: SessionCreate, db: DBSession = Depends(get_db), user: U
         db.rollback()
         raise
     db.refresh(sess)
-    return sess
+    return _session_response(sess)
 
 
 @router.get("")
@@ -153,7 +205,7 @@ def list_sessions(db: DBSession = Depends(get_db), user: User = Depends(current_
     sessions = db.exec(
         select(SessionModel).where(SessionModel.user_id == user.id).order_by(SessionModel.started_at.desc())
     ).all()
-    return sessions
+    return [_session_response(sess) for sess in sessions]
 
 
 @router.get("/{session_id}")
@@ -169,9 +221,10 @@ def get_session(session_id: str, db: DBSession = Depends(get_db), user: User = D
         .where(PolishedChunk.session_id == session_id)
         .order_by(PolishedChunk.chunk_index, PolishedChunk.created_at, PolishedChunk.id)
     ).all()
+    plan = session_plan(sess)
     return {
-        "session": sess,
-        "segments": segments,
+        "session": _session_response(sess),
+        "segments": [_segment_response(seg, plan) for seg in segments],
         "polished_chunks": [_chunk_response(chunk) for chunk in polished_chunks],
         "speakers": _speakers_response(sess, segments),
     }
@@ -191,8 +244,20 @@ def _chunk_response(chunk: PolishedChunk) -> dict:
     except ValueError:
         runs = []
     data.pop("runs_json", None)
-    data["runs"] = runs if isinstance(runs, list) else []
+    data["runs"] = [_run_response(run) for run in runs if isinstance(run, dict)] if isinstance(runs, list) else []
     return data
+
+
+def _run_response(run: dict) -> dict:
+    """Runs saved before the plan have one target: targets/translations come from it."""
+    if isinstance(run.get("translations"), dict) and isinstance(run.get("targets"), list):
+        return run
+    target = run.get("target_lang")
+    return {
+        **run,
+        "targets": [target] if target else [],
+        "translations": {target: run.get("translation") or ""} if target else {},
+    }
 
 
 def _speaker_names(sess: SessionModel) -> dict[str, str]:
@@ -288,19 +353,24 @@ def update_session(
         changes["name"] = body.name
     if body.notes is not None:
         changes["notes"] = body.notes
-    changing_direction = (
-        body.source_lang is not None or body.target_lang is not None or body.bidirectional is not None
-    )
-    if body.bidirectional is not None:
-        changes["bidirectional"] = body.bidirectional
-    if body.source_lang is not None or body.target_lang is not None:
+    legacy_given = body.source_lang is not None or body.target_lang is not None or body.bidirectional is not None
+    changing_direction = legacy_given or _has_plan_fields(body)
+    if _has_plan_fields(body):
+        # New fields win; the legacy columns are recomputed from the plan.
+        changes.update(_plan_with(body, session_plan(sess)).column_values())
+    elif legacy_given:
         source_lang = body.source_lang if body.source_lang is not None else sess.source_lang
         target_lang = body.target_lang if body.target_lang is not None else sess.target_lang
-        if not is_valid_pair(source_lang, target_lang):
+        bidirectional = body.bidirectional if body.bidirectional is not None else bool(sess.bidirectional)
+        if (body.source_lang is not None or body.target_lang is not None) and not is_valid_pair(source_lang, target_lang):
             raise HTTPException(422, "Unsupported translation direction")
-        changes.update(source_lang=source_lang, target_lang=target_lang)
+        if (source_lang, target_lang, bidirectional) == (sess.source_lang, sess.target_lang, bool(sess.bidirectional)):
+            # An old client re-saving the same direction keeps the plan (e.g. its occasional languages).
+            changes.update(source_lang=source_lang, target_lang=target_lang, bidirectional=bidirectional)
+        else:
+            changes.update(plan_from_legacy(source_lang, target_lang, bidirectional).column_values())
     if not changes:
-        return sess
+        return _session_response(sess)
     # Recording start claims created -> recording with a conditional UPDATE.
     # Use the same pattern so a late editor cannot change ASR language after
     # the WebSocket has started, even if its earlier read saw a draft.
@@ -316,7 +386,7 @@ def update_session(
         raise HTTPException(409, "Translation direction is locked after recording starts")
     db.commit()
     db.refresh(sess)
-    return sess
+    return _session_response(sess)
 
 
 @router.post("/{session_id}/end")
@@ -328,7 +398,7 @@ def end_session(session_id: str, db: DBSession = Depends(get_db), user: User = D
     """
     sess = owned_session(db, session_id, user)
     if sess.recording_state == "ended":
-        return sess   # a repeated click is not an error
+        return _session_response(sess)   # a repeated click is not an error
     pcm_path = _recording_file(sess)
     if sess.recording_state not in {"paused", "created"}:
         raise HTTPException(409, "Recording is still active; stop it from the classroom")
@@ -358,7 +428,7 @@ def end_session(session_id: str, db: DBSession = Depends(get_db), user: User = D
         raise HTTPException(409, "Recording state changed; retry")
     db.commit()
     db.refresh(sess)
-    return sess
+    return _session_response(sess)
 
 
 @router.delete("/{session_id}", status_code=204)
@@ -462,9 +532,11 @@ async def trigger_summary(
     minute_summaries = [
         f"[{_chunk_range(chunk)}] {chunk.summary}" for chunk in chunks if chunk.summary
     ]
+    plan = session_plan(sess)
+    # Written in the reading language only; each sentence carries its primary translation.
     summary = await generate_summary(
-        list(segments), sess.source_lang, sess.target_lang,
-        minute_summaries=minute_summaries, speaker_names=_speaker_names(sess),
+        list(segments), plan.main, plan.reading,
+        minute_summaries=minute_summaries, speaker_names=_speaker_names(sess), spoken_langs=plan.spoken,
     )
     sess.summary = summary
     db.commit()
@@ -479,9 +551,9 @@ def patch_segment(
     seg = db.get(Segment, segment_id)
     if not seg:
         raise HTTPException(404, "Segment not found")
-    owned_session(db, seg.session_id, user)
+    sess = owned_session(db, seg.session_id, user)
     if body.is_starred is not None:
         seg.is_starred = body.is_starred
     db.commit()
     db.refresh(seg)
-    return seg
+    return _segment_response(seg, session_plan(sess))

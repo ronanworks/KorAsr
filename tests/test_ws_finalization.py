@@ -40,6 +40,10 @@ class _Session:
         self.segment_count = 0
         self.bidirectional = False
         self.speaker_state = None
+        # Language plan columns (JSON text); None = a row saved before them (legacy fields decide).
+        self.languages = None
+        self.extra_languages = None
+        self.display_languages = None
 
 
 class _User:
@@ -147,9 +151,10 @@ class _Pipeline:
     """Records how the handler drives the per-minute polish pipeline."""
     instances = []
 
-    def __init__(self, session_id, source_lang, target_lang, raw_pcm_path, gpu_sem, send=None):
+    def __init__(self, session_id, source_lang, target_lang, raw_pcm_path, gpu_sem, send=None, plan=None):
         self.session_id = session_id
         self.languages = (source_lang, target_lang)
+        self.plan = plan
         self.send = send
         self.due_calls = []
         self.finish_calls = []
@@ -253,7 +258,7 @@ def _load_handler(db, raw_dir):
         ),
         "backend.asr.langid": _module(
             "backend.asr.langid",
-            detect_language=lambda _audio, candidates, previous=None: _Decision(candidates[0]),
+            detect_language=lambda _audio, candidates, previous=None, extra=(): _Decision(candidates[0]),
         ),
         "backend.polish.pipeline": _module(
             "backend.polish.pipeline", PolishPipeline=_Pipeline,
@@ -570,7 +575,7 @@ class FinalizationTests(_HandlerTestCase):
             seen["glossary"] = glossary
             yield "아래 글자를 띄워 보세요"
 
-        self.handler.detect_language = lambda _audio, candidates, previous=None: _Decision("zh")
+        self.handler.detect_language = lambda _audio, candidates, previous=None, extra=(): _Decision("zh")
         self.handler.transcribe_audio = transcribe
         self.handler.translate_stream = translate
         self.handler._translation_hints = lambda *_args: ([], [("스크립트", "讲稿")], "")
@@ -596,7 +601,7 @@ class FinalizationTests(_HandlerTestCase):
             calls.append(args)
             yield "不应翻译"
 
-        self.handler.detect_language = lambda _audio, candidates, previous=None: _Decision(None)
+        self.handler.detect_language = lambda _audio, candidates, previous=None, extra=(): _Decision(None)
         self.handler.translate_stream = translate
         ws = _WebSocket([
             {"type": "websocket.receive", "bytes": self.audio},
@@ -725,7 +730,7 @@ class PauseResumeTests(_HandlerTestCase):
         )
         previous_languages = []
 
-        def detect(_audio, candidates, previous=None):
+        def detect(_audio, candidates, previous=None, extra=()):
             previous_languages.append(previous)
             return _Decision("ko")
 
@@ -856,6 +861,225 @@ class PauseResumeTests(_HandlerTestCase):
 
         texts_saved = [seg.ko_text for seg in sorted(self.db.segments.values(), key=lambda seg: seg.sequence)]
         self.assertEqual(texts_saved, ["이야기 정말 하고 싶었어요.", "아 그랬어요?"])
+
+
+ENGLISH = "So one day her mother starts calling her."
+ENGLISH_ZH = ("有一天，", "她妈妈开始给她打电话。")
+ENGLISH_KO = ("어느 날 ", "엄마가 전화하기 시작했어요.")
+
+
+class MultiTargetTests(_HandlerTestCase):
+    """languages ko/zh + occasional en, display zh/ko (contract 2026-10-05)."""
+
+    def _plan(self, languages=("ko", "zh"), extra=("en",), display=("zh", "ko")):
+        session = self.db.session
+        session.bidirectional = True
+        session.languages = json.dumps(list(languages))
+        session.extra_languages = json.dumps(list(extra))
+        session.display_languages = json.dumps(list(display))
+
+    def _speech(self, lang, text):
+        seen = []
+
+        def detect(_audio, candidates, previous=None, extra=()):
+            seen.append((tuple(candidates), tuple(extra), previous))
+            return _Decision(lang)
+
+        self.handler.detect_language = detect
+        self.handler.transcribe_audio = lambda *_args, **_kwargs: text
+        return seen
+
+    async def _run(self, *messages):
+        ws = _WebSocket([*({"type": "websocket.receive", "bytes": self.audio} for _ in messages),
+                         {"type": "websocket.receive", "text": '{"action":"stop"}'}])
+        await asyncio.wait_for(self.handler.handle_ws(ws, self.db.session.id), 5)
+        return ws
+
+    async def test_english_sentence_is_translated_into_both_display_languages_in_parallel(self):
+        self._plan()
+        seen = self._speech("en", ENGLISH)
+        calls, started, both_running = [], [], asyncio.Event()
+
+        async def translate(text, previous, glossary, source_lang, target_lang, material, *_extra):
+            calls.append((text, source_lang, target_lang))
+            started.append(target_lang)
+            if len(started) == 2:
+                both_running.set()
+            await asyncio.wait_for(both_running.wait(), 2)   # neither call waits for the other to finish
+            first, second = ENGLISH_ZH if target_lang == "zh" else ENGLISH_KO
+            yield first
+            await asyncio.sleep(0.15)                         # past the 100 ms push interval
+            yield second
+
+        self.handler.translate_stream = translate
+        ws = await self._run(1)
+
+        self.assertEqual(seen, [(("ko", "zh"), ("en",), None)])   # occasional languages reach language ID
+        self.assertEqual(sorted(calls), [(ENGLISH, "en", "ko"), (ENGLISH, "en", "zh")])
+        segment = next(iter(self.db.segments.values()))
+        self.assertEqual((segment.lang, segment.target_lang), ("en", "zh"))   # primary = first display language
+        self.assertEqual(segment.zh_text, "".join(ENGLISH_ZH))
+        saved = json.loads(segment.translations)
+        self.assertEqual(list(saved), ["zh", "ko"])                         # display order
+        self.assertEqual(saved, {"zh": "".join(ENGLISH_ZH), "ko": "".join(ENGLISH_KO)})
+
+        sentence = [m for m in ws.sent if m.get("id") == segment.id]
+        self.assertEqual([m["status"] for m in sentence][0], "translating")
+        for message in sentence:   # every message: all targets, full snapshot, legacy fields = primary
+            self.assertEqual(message["targets"], ["zh", "ko"])
+            self.assertEqual(list(message["translations"]), ["zh", "ko"])
+            self.assertEqual(set(message["translation_state"]), {"zh", "ko"})
+            self.assertEqual((message["lang"], message["target_lang"]), ("en", "zh"))
+        progress = [m for m in sentence if m["status"] == "translating"][1:]
+        self.assertTrue(any(m["translations"]["zh"] and m["translations"]["ko"] for m in progress))
+        self.assertTrue(all(m["translation_state"] == {"zh": "translating", "ko": "translating"} for m in progress))
+        done = sentence[-1]
+        self.assertEqual((done["status"], done["zh"]), ("done", "".join(ENGLISH_ZH)))
+        self.assertEqual(done["translations"], saved)
+        self.assertEqual(done["translation_state"], {"zh": "done", "ko": "done"})
+
+    async def test_one_failed_target_leaves_the_sentence_done(self):
+        self._plan()
+        self._speech("en", ENGLISH)
+
+        async def translate(text, previous, glossary, source_lang, target_lang, material, *_extra):
+            if target_lang == "ko":
+                yield "어느"
+                raise RuntimeError("stream interrupted")
+            yield "有一天，她妈妈开始给她打电话。"
+
+        self.handler.translate_stream = translate
+        ws = await self._run(1)
+        segment = next(iter(self.db.segments.values()))
+        self.assertEqual(segment.zh_text, "有一天，她妈妈开始给她打电话。")
+        self.assertEqual(json.loads(segment.translations), {"zh": "有一天，她妈妈开始给她打电话。", "ko": None})
+        done = ws.sent[-1]
+        self.assertEqual(done["status"], "done")
+        self.assertEqual(done["translation_state"], {"zh": "done", "ko": "error"})
+        self.assertIsNone(done["translations"]["ko"])   # the partial "어느" is never shown as final
+
+    async def test_primary_failure_keeps_the_legacy_field_unavailable_and_all_failures_are_errors(self):
+        self._plan()
+        self._speech("en", ENGLISH)
+
+        async def only_korean(text, previous, glossary, source_lang, target_lang, material, *_extra):
+            if target_lang == "zh":
+                raise TimeoutError("slow")
+            yield "어느 날 엄마가 전화하기 시작했어요."
+
+        self.handler.translate_stream = only_korean
+        ws = await self._run(1)
+        segment = next(iter(self.db.segments.values()))
+        self.assertIsNone(segment.zh_text)
+        self.assertEqual(json.loads(segment.translations)["ko"], "어느 날 엄마가 전화하기 시작했어요.")
+        self.assertEqual((ws.sent[-1]["status"], ws.sent[-1]["zh"]), ("done", "翻译暂不可用"))
+
+        self.db.segments.clear()
+        self.db.session.recording_state = "created"
+        self.db.session.ended_at = None
+        (Path(self.tmp.name) / f"{self.db.session.id}.pcm").unlink()
+
+        async def nothing(*_args):
+            raise RuntimeError("down")
+            yield ""
+
+        self.handler.translate_stream = nothing
+        ws = await self._run(1)
+        segment = next(iter(self.db.segments.values()))
+        self.assertEqual((segment.zh_text, json.loads(segment.translations)), (None, {"zh": None, "ko": None}))
+        self.assertEqual((ws.sent[-1]["status"], ws.sent[-1]["zh"]), ("error", "翻译暂不可用"))
+        self.assertEqual(ws.sent[-1]["translation_state"], {"zh": "error", "ko": "error"})
+
+    async def test_korean_and_chinese_keep_their_single_target_in_a_multilingual_class(self):
+        self._plan()
+        for lang, text, expected_target in (("ko", "오늘은 광합성", "zh"), ("zh", "讲稿在下面", "ko")):
+            with self.subTest(lang=lang):
+                self.db.segments.clear()
+                self.db.session.recording_state = "created"
+                self.db.session.ended_at = None
+                pcm = Path(self.tmp.name) / f"{self.db.session.id}.pcm"
+                if pcm.exists():
+                    pcm.unlink()
+                self._speech(lang, text)
+                calls = []
+
+                async def translate(_text, _previous, glossary, source_lang, target_lang, *_extra):
+                    calls.append((source_lang, target_lang, glossary))
+                    yield "译文" if target_lang == "zh" else "번역"
+
+                self.handler.translate_stream = translate
+                self.handler._translation_hints = lambda *_args: ([], [("선물", "期货")], "")
+                ws = await self._run(1)
+                segment = next(iter(self.db.segments.values()))
+                self.assertEqual(calls[0][:2], (lang, expected_target))
+                self.assertEqual(len(calls), 1)
+                # Glossary direction as before: main-language speech forward, reading-language speech reversed.
+                self.assertEqual(calls[0][2], [("선물", "期货")] if lang == "ko" else [("期货", "선물")])
+                self.assertEqual((segment.lang, segment.target_lang), (lang, expected_target))
+                self.assertEqual(list(json.loads(segment.translations)), [expected_target])
+                self.assertEqual(ws.sent[-1]["targets"], [expected_target])
+
+    async def test_speech_in_the_only_display_language_is_not_translated(self):
+        self._plan(languages=("ko", "zh"), extra=(), display=("zh",))
+        self._speech("zh", "然后教授的话呢")
+        calls = []
+
+        async def translate(*args):
+            calls.append(args)
+            yield "不应翻译"
+
+        self.handler.translate_stream = translate
+        ws = await self._run(1)
+        segment = next(iter(self.db.segments.values()))
+        self.assertEqual(calls, [])
+        self.assertEqual((segment.lang, segment.target_lang, segment.zh_text), ("zh", None, None))
+        self.assertEqual(json.loads(segment.translations), {})
+        self.assertEqual(ws.sent[-1]["status"], "done")
+        self.assertEqual((ws.sent[-1]["targets"], ws.sent[-1]["translations"]), ([], {}))
+
+    async def test_the_polish_pipeline_and_resume_language_follow_the_plan(self):
+        self._plan()
+        self.db.session.recording_state = "paused"
+        (Path(self.tmp.name) / f"{self.db.session.id}.pcm").write_bytes(self.audio)
+        self.db.segments["old"] = _Segment(
+            id="old", session_id=self.db.session.id, sequence=0, timestamp_ms=0, lang="en",
+            ko_text="Next.", zh_text="下一个。", speaker=None, start_ms=0, end_ms=900,
+        )
+        seen = self._speech("en", ENGLISH)
+        self.handler.translate_stream = _translate_ok
+        await self._run(1)
+        pipeline = _Pipeline.instances[-1]
+        self.assertEqual(pipeline.languages, ("ko", "zh"))               # legacy main / reading
+        self.assertEqual((pipeline.plan.frequent, pipeline.plan.extra, pipeline.plan.display),
+                         (("ko", "zh"), ("en",), ("zh", "ko")))
+        self.assertEqual(seen[0][2], "en")   # an occasional language resumes as the previous language
+
+
+class ContextAndGlossaryTests(unittest.TestCase):
+    def setUp(self):
+        self.handler = _load_handler(_Database(), Path(tempfile.gettempdir()))
+
+    def test_earlier_sentences_show_the_translation_into_the_same_target(self):
+        items = [
+            ("en", "Next.", "zh", "下一个。", {"zh": "下一个。", "ko": "다음."}),
+            ("ko", "네", "zh", "好", {"zh": "好"}),
+            (None, "옛 문장", None, "旧句", {}),
+        ]
+        self.assertEqual(self.handler._previous_for_target(items, "ko"), [
+            ("en", "Next.", "ko", "다음."), ("ko", "네", "zh", "好"), ("옛 문장", "旧句"),
+        ])
+        self.assertEqual(self.handler._previous_for_target(items, "zh")[0], ("en", "Next.", "zh", "下一个。"))
+
+    def test_glossary_is_oriented_by_the_spoken_language(self):
+        from backend.languages import LanguagePlan
+        plan = LanguagePlan(("ko", "zh"), ("en",), ("zh", "ko"))
+        glossary = [("선물", "期货"), ("ComfyUI", "ComfyUI 工具"), ("모델", "模型")]
+        self.assertEqual(self.handler._glossary_for(glossary, "ko", plan, "선물"), glossary)
+        self.assertEqual(self.handler._glossary_for(glossary, "zh", plan, "期货")[0], ("期货", "선물"))
+        self.assertEqual(
+            self.handler._glossary_for(glossary, "en", plan, "We use ComfyUI and 模型 here"),
+            [("ComfyUI", "ComfyUI 工具"), ("模型", "모델")],
+        )
 
 
 if __name__ == "__main__":

@@ -274,16 +274,16 @@ class RestEndAndDeleteTests(_DatabaseCase):
         sess = self.add_session(recording_state="paused", duration_seconds=1)
         self.pcm(sess).write_bytes(b"\0" * 64_000 * 5 + b"\0" * 32_000)   # 5.5 s recorded
         ended = sessions_api.end_session(sess.id, self.db, self.user)
-        self.assertEqual((ended.recording_state, ended.duration_seconds), ("ended", 5))
-        self.assertIsNotNone(ended.ended_at)
+        self.assertEqual((ended["recording_state"], ended["duration_seconds"]), ("ended", 5))
+        self.assertIsNotNone(ended["ended_at"])
         self.assertEqual(self.pcm(sess).stat().st_size, 64_000 * 5 + 32_000)   # file untouched
         # A second click is not an error and changes nothing.
         again = sessions_api.end_session(sess.id, self.db, self.user)
-        self.assertEqual(again.ended_at, ended.ended_at)
+        self.assertEqual(again["ended_at"], ended["ended_at"])
 
     def test_unrecorded_draft_can_be_ended_but_not_one_with_a_recording(self):
         draft = self.add_session()
-        self.assertEqual(sessions_api.end_session(draft.id, self.db, self.user).duration_seconds, 0)
+        self.assertEqual(sessions_api.end_session(draft.id, self.db, self.user)["duration_seconds"], 0)
         stuck = self.add_session()
         self.pcm(stuck).write_bytes(b"\0" * 8)
         with self.assertRaises(HTTPException) as raised:

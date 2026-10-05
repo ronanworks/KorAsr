@@ -44,6 +44,17 @@ class Settings(BaseSettings):
     vad_min_silence_ms: int = 600                  # down from 1000 — faster sentence boundary detection
     vad_min_speech_ms: int = 250
 
+    # Occasional classroom languages (extra_languages, e.g. en/ru) need clear evidence:
+    # Whisper p(L) ≥ min_prob and ≥ min_ratio × the best frequent language, and ≥ min_speech_s
+    # of speech after trimming silence; while the previous sentence was already L, a plain
+    # majority with p(L) ≥ sticky_min_prob suffices. Chosen on the 10-02 class
+    # (data/eval/2026-10-05/multilang/design.md §8.6): 30/48 English clips shown, 0 saved
+    # Korean/Chinese sentences changed. 0.7 is the conservative alternative for min_prob.
+    langid_extra_min_prob: float = 0.5
+    langid_extra_min_ratio: float = 2.0
+    langid_extra_min_speech_s: float = 1.0
+    langid_extra_sticky_min_prob: float = 0.2
+
     # Union type prevents pydantic-settings from attempting json.loads before the validator
     hallucination_blacklist: Union[List[str], str] = [
         "자막", "시청해주셔서", "구독", "좋아요", "MBC", "SBS", "KBS",
