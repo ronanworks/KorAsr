@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -15,12 +16,12 @@ from sqlalchemy import update
 from backend.asr.transcriber import Transcriber, strip_repeated_boundary, transcribe_audio
 from backend.asr.langid import detect_language
 from backend.languages import candidate_languages, translation_target
-from backend.translation.moonshot import sanitize_translation, translate_stream
+from backend.translation.moonshot import fragment_hint, sanitize_translation, translate_stream
 from backend.polish.pipeline import PolishPipeline, SpeakerHooks, parse_speaker_names
 from backend.speaker.embedding import get_embedder, speech_duration_s
 from backend.speaker.tracker import OnlineSpeakerTracker
 from backend.storage.database import engine
-from backend.storage.models import Session as SessionModel, Segment, GlossaryTerm, User
+from backend.storage.models import Session as SessionModel, Segment, GlossaryTerm, PolishedChunk, User
 from backend.storage.raw_audio import RAW_SAMPLE_BYTES, SAMPLE_RATE, recording_path
 from backend.materials.context import get_relevant_material_context
 
@@ -221,30 +222,63 @@ def _close_recording(
         db.commit()
 
 
-def _translation_hints(session_id: str, sequence: int) -> tuple[list[tuple], list[tuple[str, str]]]:
-    """Read only earlier confirmed text, plus the session's current glossary.
+CONTEXT_WINDOW_MS = 60_000     # earlier sentences shown to the live translator
+CONTEXT_MAX_ITEMS = 8
+_DEFAULT_NAME_RE = re.compile(r"^课堂\s*·\s*\d+月\d+日$")
 
-    Previous items carry their own languages because a bidirectional class
-    mixes directions: (spoken_lang, spoken, translated_lang, translation).
+
+def _topic_hint(sess, last_summary: str | None) -> str:
+    """Class name (when the user gave one) and the latest per-minute key points."""
+    parts = []
+    name = (getattr(sess, "name", "") or "").strip()
+    if name and not _DEFAULT_NAME_RE.match(name):
+        parts.append(f"课程名称：{name[:40]}")
+    summary = (last_summary or "").strip()
+    # "（无实质内容）" and similar markers are not topics.
+    if summary and not (summary.startswith("（") and summary.endswith("）")):
+        points = "；".join(line.lstrip("-•· ").strip() for line in summary.splitlines() if line.strip())
+        parts.append(f"刚才讲到：{points[:160]}")
+    return "；".join(parts)
+
+
+def _translation_hints(
+    session_id: str, sequence: int, start_ms: int | None = None,
+) -> tuple[list[tuple], list[tuple[str, str]], str]:
+    """Read only earlier confirmed text, the session's glossary and a topic line.
+
+    About a minute of earlier sentences lets the translator resolve references and
+    fix near-homophone ASR errors (10-02: 비염구조 for 비용 구조 was translated
+    literally with two sentences of context). Previous items carry their own
+    languages because a bidirectional class mixes directions:
+    (spoken_lang, spoken, translated_lang, translation).
     """
     with DBSession(engine) as db:
-        previous = db.exec(
-            select(Segment)
-            .where(Segment.session_id == session_id, Segment.sequence < sequence)
-            .order_by(Segment.sequence.desc())
-            .limit(2)
-        ).all()
+        query = select(Segment).where(Segment.session_id == session_id, Segment.sequence < sequence)
+        if start_ms is not None:
+            query = query.where(Segment.start_ms >= start_ms - CONTEXT_WINDOW_MS)
+        previous = db.exec(query.order_by(Segment.sequence.desc()).limit(CONTEXT_MAX_ITEMS)).all()
         terms = db.exec(
             select(GlossaryTerm)
             .where(GlossaryTerm.session_id == session_id)
             .order_by(GlossaryTerm.source)
         ).all()
+        sess = db.get(SessionModel, session_id)
+        last_summary = db.exec(
+            select(PolishedChunk.summary)
+            .where(PolishedChunk.session_id == session_id, PolishedChunk.status == "ok")
+            .order_by(PolishedChunk.chunk_index.desc())
+            .limit(1)
+        ).first()
     previous_items = [
         (row.lang, row.ko_text, row.target_lang, row.zh_text or "") if row.lang else (row.ko_text, row.zh_text or "")
         for row in reversed(previous)
     ]
     glossary = [(row.source, row.target) for row in terms]
-    return previous_items, glossary
+    return previous_items, glossary, _topic_hint(sess, last_summary)
+
+
+def _same_text(a: str, b: str) -> bool:
+    return " ".join(a.split()) == " ".join(b.split())
 
 
 def _speaker_names(session_id: str) -> dict[str, str]:
@@ -477,7 +511,9 @@ async def handle_ws(websocket: WebSocket, session_id: str):
         return assignment.speaker
 
     # ── 单段 final segment 处理（语言识别 → 识别 → 说话人 → 存原文 → 翻译 → 更新 DB → 推 WS）
-    async def _process_final(audio, seg_id, span, s_id, seq_num, context, send_ws=True, continuation=False):
+    async def _process_final(
+        audio, seg_id, span, s_id, seq_num, context, send_ws=True, continuation=False, ends_forced=False,
+    ):
         nonlocal rolling_context, last_lang
         start_ms, end_ms = span
 
@@ -541,10 +577,11 @@ async def handle_ws(websocket: WebSocket, session_id: str):
 
         # 流式翻译：边收 token 边推 WS；节流：每 100ms 最多推一次
         try:
-            previous_items, glossary = _translation_hints(s_id, seq_num)
+            previous_items, glossary, topic = await asyncio.to_thread(_translation_hints, s_id, seq_num, start_ms)
         except Exception as e:
             print(f"[WS final ] seg={seg_id[:8]} context lookup failed: {type(e).__name__}: {e}")
-            previous_items, glossary = [], []
+            previous_items, glossary, topic = [], [], ""
+        hint = fragment_hint(continuation, ends_forced, lang, ko)
         if lang != source_lang:
             # The glossary is written source→target; reversed speech uses it backwards.
             glossary = [(target, source) for source, target in glossary]
@@ -561,7 +598,7 @@ async def handle_ws(websocket: WebSocket, session_id: str):
         try:
             async with asyncio.timeout(90):
                 async for delta in translate_stream(
-                    ko, previous_items, glossary, lang, seg_target, material_context,
+                    ko, previous_items, glossary, lang, seg_target, material_context, topic, hint,
                 ):
                     zh_acc += delta
                     now = time.time()
@@ -578,9 +615,9 @@ async def handle_ws(websocket: WebSocket, session_id: str):
 
         if translation_complete and zh_acc:
             # The model sometimes explains an unintelligible clip instead of translating it.
-            cleaned = sanitize_translation(ko, zh_acc)
-            if cleaned != zh_acc:
-                print(f"[WS final ] seg={seg_id[:8]} translation replaced ({len(zh_acc)} chars were explanation)")
+            cleaned = sanitize_translation(ko, zh_acc, lang, seg_target)
+            if not _same_text(cleaned, zh_acc):
+                print(f"[WS final ] seg={seg_id[:8]} translation replaced: {len(zh_acc)} chars -> {ascii(cleaned[:40])}")
             zh_acc = cleaned
             with DBSession(engine) as db:
                 seg = db.get(Segment, seg_id)
@@ -598,10 +635,10 @@ async def handle_ws(websocket: WebSocket, session_id: str):
                 **meta,
             })
 
-    def _schedule_final(audio, seg_id, span, seq_num, context, send_ws=True, continuation=False):
+    def _schedule_final(audio, seg_id, span, seq_num, context, send_ws=True, continuation=False, ends_forced=False):
         inflight_starts[seg_id] = span[0]
         task = asyncio.create_task(
-            _process_final(audio, seg_id, span, session_id, seq_num, context, send_ws, continuation)
+            _process_final(audio, seg_id, span, session_id, seq_num, context, send_ws, continuation, ends_forced)
         )
         final_tasks.add(task)
 
@@ -769,7 +806,10 @@ async def handle_ws(websocket: WebSocket, session_id: str):
                     last_interim_time = time.time()
                     ctx = rolling_context   # snapshot for this segment's inference
 
-                    _schedule_final(final_audio, final_id, _commit_span(), seq, ctx, continuation=continuation)
+                    _schedule_final(
+                        final_audio, final_id, _commit_span(), seq, ctx,
+                        continuation=continuation, ends_forced=result["is_forced"],
+                    )
 
             elif message.get("text"):
                 # 控制消息：{"action": "stop"} 结束课堂；{"action": "pause"} 暂停（可继续）

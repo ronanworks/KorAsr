@@ -109,8 +109,11 @@ class PromptTests(unittest.TestCase):
         system, user = messages[0]["content"], messages[1]["content"]
         self.assertIn("本分钟要点", system)
         self.assertIn("用中文写", system)
-        self.assertIn("[1] 说话人1（教授） · 韩语→中文：오늘은 광합성을 설명합니다.", user)
-        self.assertIn("[2] 说话人2 · 中文→韩语：讲稿在下面", user)
+        # Header and text on separate lines so the model does not copy the label.
+        self.assertIn("[1] 译成中文｜说话人1（教授）\n오늘은 광합성을 설명합니다.", user)
+        self.assertIn("[2] 译成韩语｜说话人2\n讲稿在下面", user)
+        self.assertNotIn("无法理解的段落只输出", system)
+        self.assertIn("必须用那种语言输出", system)
         self.assertLess(user.index("上一分钟"), user.index("本分钟逐段原文"))
         self.assertEqual(user.count("오늘은 광합성을 설명합니다."), 1)
 
@@ -144,6 +147,19 @@ class ParseTests(unittest.TestCase):
     def test_no_content_marker_is_kept_verbatim(self):
         _translations, summary = parse_polish_output("[1] 好的。\n要点：（无实质内容）", 1)
         self.assertEqual(summary, "（无实质内容）")
+
+    def test_copied_run_labels_are_stripped(self):
+        # 10-02: 87 of 455 polished runs began with "说话人3 · 韩语→中文：".
+        output = (
+            "[1] 说话人4 · 中文→韩语：그리고 이 수업에서는\n"
+            "[2] 译成中文｜说话人1（教授）\n今天讲光合作用。\n"
+            "[3] 译文：强化学习\n"
+            "[4] 说话人认为这样不对。\n"
+        )
+        translations, _summary = parse_polish_output(output, 4)
+        self.assertEqual(translations, {
+            1: "그리고 이 수업에서는", 2: "今天讲光合作用。", 3: "强化学习", 4: "说话人认为这样不对。",
+        })
 
 
 class _FakeStream:
@@ -207,6 +223,18 @@ class PolishCallTests(unittest.IsolatedAsyncioTestCase):
             result = await polish_runs(runs)
         self.assertEqual(result.state, "fallback")
         self.assertEqual(result.runs[0].translation, "挺有意思")
+
+    async def test_run_left_in_the_spoken_language_uses_the_live_translation(self):
+        # 10-02: Chinese→Korean runs often came back as rewritten Chinese.
+        client = _FakeClient(["[1] 今天讲光合作用。\n[2] 讲稿就在下面这里。\n要点：\n- 光合作用"])
+        runs = [
+            _run("오늘은 광합성을 설명합니다."),
+            _run("讲稿在下面", speaker=1, lang="zh", target="ko", realtime_translation="강의안은 아래에 있어요"),
+        ]
+        with patch.object(translator, "get_client", return_value=client):
+            result = await polish_runs(runs, summary_lang="zh")
+        self.assertEqual([r.translation for r in result.runs], ["今天讲光合作用。", "강의안은 아래에 있어요"])
+        self.assertEqual(result.state, "ok")
 
     async def test_insane_length_translation_is_replaced_per_run(self):
         client = _FakeClient(["[1] 好。\n[2] " + "这是一段被模型凭空扩写出来的很长很长的内容，" * 12 + "\n要点：\n- 要点"])

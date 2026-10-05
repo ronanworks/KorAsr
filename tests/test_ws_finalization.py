@@ -248,7 +248,8 @@ def _load_handler(db, raw_dir):
         ),
         "backend.translation.moonshot": _module(
             "backend.translation.moonshot", translate_stream=None,
-            sanitize_translation=lambda _source, translation: translation,
+            sanitize_translation=lambda _source, translation, *_langs: translation,
+            fragment_hint=lambda *_args: "",
         ),
         "backend.asr.langid": _module(
             "backend.asr.langid",
@@ -268,6 +269,7 @@ def _load_handler(db, raw_dir):
         "backend.storage.models": _module(
             "backend.storage.models", Session=_Session, Segment=_Segment,
             GlossaryTerm=type("GlossaryTerm", (), {}),
+            PolishedChunk=type("PolishedChunk", (), {}),
             User=_User,
         ),
         "backend.storage.raw_audio": _module(
@@ -284,7 +286,7 @@ def _load_handler(db, raw_dir):
         spec.loader.exec_module(module)
     # Windows 的测试控制台可能采用 cp1252，业务日志中包含 Unicode 箭头。
     module.print = lambda *_args, **_kwargs: None
-    module._translation_hints = lambda *_args: ([], [])
+    module._translation_hints = lambda *_args: ([], [], "")
     module._speaker_names = lambda _session_id: {}
     def claim(session_id, user_id):
         session = db.sessions.get(session_id)
@@ -334,7 +336,7 @@ class FinalizationTests(_HandlerTestCase):
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context):
+        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context, *_extra):
             started.set()
             await release.wait()
             yield "中文"
@@ -364,7 +366,7 @@ class FinalizationTests(_HandlerTestCase):
         self.assertEqual(ws.sent[-1]["status"], "done")
 
     async def test_send_failure_does_not_skip_translation_or_database(self):
-        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context):
+        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context, *_extra):
             yield "译文"
 
         self.handler.translate_stream = translate
@@ -384,7 +386,7 @@ class FinalizationTests(_HandlerTestCase):
     async def test_abrupt_disconnect_flushes_uncommitted_tail(self):
         self.handler.Transcriber.should_process = False
 
-        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context):
+        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context, *_extra):
             yield "尾句译文"
 
         self.handler.translate_stream = translate
@@ -403,7 +405,7 @@ class FinalizationTests(_HandlerTestCase):
         self.assertEqual(_Pipeline.instances[-1].finish_calls, [(1000, False)])
 
     async def test_interrupted_translation_does_not_commit_partial_chinese(self):
-        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context):
+        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context, *_extra):
             yield "半句"
             raise RuntimeError("stream interrupted")
 
@@ -423,7 +425,7 @@ class FinalizationTests(_HandlerTestCase):
     async def test_second_socket_cannot_overwrite_active_recording(self):
         self.handler.Transcriber.should_process = False
 
-        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context):
+        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context, *_extra):
             yield "译文"
 
         self.handler.translate_stream = translate
@@ -455,7 +457,7 @@ class FinalizationTests(_HandlerTestCase):
         self.db.sessions[other.id] = other
         self.handler.Transcriber.should_process = False
 
-        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context):
+        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context, *_extra):
             yield "译文"
 
         self.handler.translate_stream = translate
@@ -494,7 +496,7 @@ class FinalizationTests(_HandlerTestCase):
             seen["asr_language"] = kwargs["language"]
             return "今天讨论经济学"
 
-        async def translate(text, _previous, _glossary, source_lang, target_lang, material_context):
+        async def translate(text, _previous, _glossary, source_lang, target_lang, material_context, *_extra):
             seen["translation"] = (text, source_lang, target_lang)
             seen["material_context"] = material_context
             yield "Сегодня обсудим экономику"
@@ -516,7 +518,7 @@ class FinalizationTests(_HandlerTestCase):
     async def test_disabling_account_closes_existing_recording(self):
         self.handler.ACCOUNT_RECHECK_INTERVAL_S = 0
 
-        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context):
+        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context, *_extra):
             yield "译文"
 
         self.handler.translate_stream = translate
@@ -535,7 +537,7 @@ class FinalizationTests(_HandlerTestCase):
         self.assertEqual(self.db.session.recording_state, "paused")
 
     async def test_stop_drains_polish_after_all_finals_are_saved(self):
-        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context):
+        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context, *_extra):
             yield "译文"
 
         self.handler.translate_stream = translate
@@ -563,7 +565,7 @@ class FinalizationTests(_HandlerTestCase):
             seen["asr_language"] = kwargs["language"]
             return "你把下面那个文字打出来看一下"
 
-        async def translate(text, previous, glossary, source_lang, target_lang, material_context):
+        async def translate(text, previous, glossary, source_lang, target_lang, material_context, *_extra):
             seen["translation"] = (source_lang, target_lang)
             seen["glossary"] = glossary
             yield "아래 글자를 띄워 보세요"
@@ -571,7 +573,7 @@ class FinalizationTests(_HandlerTestCase):
         self.handler.detect_language = lambda _audio, candidates, previous=None: _Decision("zh")
         self.handler.transcribe_audio = transcribe
         self.handler.translate_stream = translate
-        self.handler._translation_hints = lambda *_args: ([], [("스크립트", "讲稿")])
+        self.handler._translation_hints = lambda *_args: ([], [("스크립트", "讲稿")], "")
         ws = _WebSocket([
             {"type": "websocket.receive", "bytes": self.audio},
             {"type": "websocket.receive", "text": '{"action":"stop"}'},
@@ -611,7 +613,7 @@ class FinalizationTests(_HandlerTestCase):
             def embed(self, audio):
                 return np.ones(192, dtype=np.float32)
 
-        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context):
+        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context, *_extra):
             yield "译文"
 
         self.handler.get_embedder = lambda: Embedder()
@@ -839,7 +841,7 @@ class PauseResumeTests(_HandlerTestCase):
     async def test_word_repeated_across_a_forced_cut_is_dropped(self):
         texts = iter(["이야기 정말 하고 싶었어요.", "싶었어요. 아 그랬어요?"])
 
-        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context):
+        async def translate(_text, _previous, _glossary, _source_lang, _target_lang, _material_context, *_extra):
             yield "译文"
 
         self.handler.transcribe_audio = lambda *_args, **_kwargs: next(texts)

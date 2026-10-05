@@ -33,7 +33,13 @@ COMMON_HALLUCINATION_PHRASES = {
     "谢谢", "谢谢。", "謝謝", "謝謝。",
     "谢谢大家", "谢谢大家。", "謝謝大家", "謝謝大家。",
     "嗯", "嗯。", "好", "好。",
+    # 10-02 课堂第 73 分钟："여러분 안녕히 계세요." 出现在讲课中途，精修重识别里没有
+    "안녕히 계세요", "안녕히 계세요.", "여러분 안녕히 계세요", "여러분 안녕히 계세요.",
 }
+
+# Whole outputs that are hallucinations at any loudness: "아멘" came out of
+# classroom noise 6 times in the 09-29 and 10-02 classes.
+ALWAYS_HALLUCINATION_PHRASES = {"아멘", "아멘.", "아멘!"}
 
 # Whisper's Chinese counterpart of the Korean TV-subtitle hallucinations; only
 # short outputs are dropped, as in the Korean blacklist below.
@@ -143,6 +149,8 @@ def _is_low_energy_common_hallucination(text: str, rms: float) -> bool:
 
     高能量时的同一短语（用户真的说了"감사합니다"）允许通过。
     """
+    if text.strip() in ALWAYS_HALLUCINATION_PHRASES:
+        return True
     if rms > LOW_ENERGY_HALLUCINATION_RMS:
         return False
     return text.strip() in COMMON_HALLUCINATION_PHRASES
