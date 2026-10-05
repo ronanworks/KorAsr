@@ -60,9 +60,12 @@ class Settings(BaseSettings):
     langid_extra_min_speech_s: float = 1.0
     langid_extra_sticky_min_prob: float = 0.2
 
-    # Union type prevents pydantic-settings from attempting json.loads before the validator
+    # Union type prevents pydantic-settings from attempting json.loads before the validator.
+    # Substrings of short outputs. "구독" / "좋아요" alone dropped real speech
+    # ("말씀을 드리면 구독료, 데이터센터 사용료"), so only the video-outro phrases are listed.
     hallucination_blacklist: Union[List[str], str] = [
-        "자막", "시청해주셔서", "구독", "좋아요", "MBC", "SBS", "KBS",
+        "자막", "시청해주셔서", "MBC", "SBS", "KBS",
+        "구독과 좋아요", "구독 좋아요", "구독 부탁", "좋아요 부탁", "좋아요와 구독",
         "기상캐스터", "다음 영상에서 만나요", "시청자 여러분",
         "Korean university lecture", "이것은 한국 대학교",
         "자막 제공", "번역 제공", "cc 자막", "한국어 자막",

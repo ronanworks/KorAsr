@@ -15,7 +15,11 @@ SAMPLE_RATE = 16000
 OVERLAP_SAMPLES = int(SAMPLE_RATE * 0.4)  # 400ms 重叠窗口，防止切词
 PRE_SPEECH_SAMPLES = int(SAMPLE_RATE * 0.6)  # Keep only 600ms before VAD first finds speech.
 PROMPT_ECHO_THRESHOLD = 0.65               # 输出与 prompt 字符相似度高于此值即视为 prompt 回放
-FINAL_MIN_RMS = 0.005                      # finals 阶段音频 RMS 低于此值直接跳过 Whisper（防止噪声幻觉）
+# finals 阶段音频 RMS 低于此值直接跳过 Whisper（防止噪声幻觉）。0.005 → 0.002 (2026-10-05):
+# on the 10-02 class the clips skipped at 0.005 gave 43 recovered sentences, 1 wrong and
+# no hallucination when recognised (data/eval/2026-10-05/asr_drops/gate_population.json,
+# key "rms0.002"); quiet student turns after the break were the ones lost.
+FINAL_MIN_RMS = 0.002
 LOW_ENERGY_HALLUCINATION_RMS = 0.025       # 短语精确匹配的"低能量幻觉"阈值（高于此值认为是真说话，不挡）
 REPETITION_UNIQUE_RATIO = 0.30             # 输出 ≥6 词时若 distinct/total < 此值视为循环幻觉
 
