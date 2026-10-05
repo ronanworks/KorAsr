@@ -4,7 +4,8 @@ import { ref, computed } from 'vue'
 import axios from 'axios'
 import { isSpeakerIndex, mergeSpeakerList, normalizeSpeakerName, SPEAKER_NAME_MAX } from '../utils/speakers.js'
 import { normalizeOutline, normalizePolishChunk, upsertPolishChunk } from '../utils/polish.js'
-import { mergeSegmentUpdate, segmentFromRecord } from '../utils/segments.js'
+import { mergeSegmentUpdate, segmentFromRecord, withTranslationFields } from '../utils/segments.js'
+import { DEFAULT_PLAN, normalizePlan, planFromLegacy, planLegacyFields, planRequestFields, sessionPlan } from '../utils/languages.js'
 
 // Automatic reconnects after an unexpected close (Wi-Fi/Tailscale hiccup, laptop
 // sleep). The server pauses a class whose socket drops, so each attempt resumes it.
@@ -19,12 +20,26 @@ function bidirectionalOption(options) {
   return typeof options?.bidirectional === 'boolean' ? options.bidirectional : undefined
 }
 
+// Trailing option { plan: { languages, extraLanguages, displayLanguages } } (contract 2026-10-05).
+function planOption(options) {
+  return options && typeof options === 'object' && options.plan ? normalizePlan(options.plan) : null
+}
+
 export const useSessionStore = defineStore('session', () => {
   const currentSessionId = ref(null)
   const sessionName = ref('')
   const segments = ref([])
   const polishChunks = ref([])    // 60s 一批的 LLM 精修翻译块（含本分钟要点与分说话人 runs）
   const glossaryTerms = ref([])
+  // Language plan of the class: frequent languages (main first), occasional languages,
+  // display languages (reading language first).
+  const languages = ref([...DEFAULT_PLAN.languages])
+  const extraLanguages = ref([...DEFAULT_PLAN.extraLanguages])
+  const displayLanguages = ref([...DEFAULT_PLAN.displayLanguages])
+  const plan = computed(() => ({
+    languages: languages.value, extraLanguages: extraLanguages.value, displayLanguages: displayLanguages.value,
+  }))
+  // Legacy view of the plan, kept for older callers: main → reading language.
   const sourceLang = ref('ko')
   const targetLang = ref('zh')
   const bidirectional = ref(true) // 自动识别双语：目标语言的发言反向翻译成源语言
@@ -90,20 +105,37 @@ export const useSessionStore = defineStore('session', () => {
     timerInterval = null
   }
 
-  // Bidirectional defaults to true (contract §1).
+  function applyPlan(next) {
+    const normalized = normalizePlan(next)
+    languages.value = normalized.languages
+    extraLanguages.value = normalized.extraLanguages
+    displayLanguages.value = normalized.displayLanguages
+    const legacy = planLegacyFields(normalized)
+    sourceLang.value = legacy.source_lang
+    targetLang.value = legacy.target_lang
+    bidirectional.value = legacy.bidirectional
+  }
+
+  // The plan the server saved (create/patch responses carry the arrays); else the one sent.
+  function planFromResponse(data, fallback) {
+    return Array.isArray(data?.languages) && Array.isArray(data?.display_languages) ? sessionPlan(data) : fallback
+  }
+
+  // Bidirectional defaults to true (contract §1). options.plan sends the language plan
+  // (and the legacy fields derived from it); without it the request body is the old one.
   async function prepareSession(name, terms = [], source = 'ko', target = 'zh', options = {}) {
+    const requested = planOption(options)
     const twoWay = bidirectionalOption(options) ?? true
-    const res = await axios.post('/api/sessions', {
-      name, glossary_terms: terms, source_lang: source, target_lang: target, bidirectional: twoWay,
-    })
+    const body = requested
+      ? { name, glossary_terms: terms, ...planRequestFields(requested) }
+      : { name, glossary_terms: terms, source_lang: source, target_lang: target, bidirectional: twoWay }
+    const res = await axios.post('/api/sessions', body)
     cancelReconnect()
     clearTimeout(notesSaveTimeout)
     currentSessionId.value = res.data.id
     sessionName.value = name
     glossaryTerms.value = terms
-    sourceLang.value = source
-    targetLang.value = target
-    bidirectional.value = twoWay
+    applyPlan(planFromResponse(res.data, requested ?? planFromLegacy(source, target, twoWay)))
     speakers.value = {}
     outline.value = null
     recordingStatus.value = 'prepared'
@@ -129,9 +161,7 @@ export const useSessionStore = defineStore('session', () => {
     clearTimeout(notesSaveTimeout)
     currentSessionId.value = sessionId
     sessionName.value = data.session.name
-    sourceLang.value = data.session.source_lang || 'ko'
-    targetLang.value = data.session.target_lang || 'zh'
-    bidirectional.value = data.session.bidirectional !== false
+    applyPlan(sessionPlan(data.session))
     speakers.value = mergeSpeakerList({}, data.speakers, { authoritative: true })
     outline.value = normalizeOutline(data.session.live_outline)
     glossaryTerms.value = glossary.data.terms || []
@@ -170,9 +200,7 @@ export const useSessionStore = defineStore('session', () => {
     ws = null
     currentSessionId.value = sessionId
     sessionName.value = data.session.name
-    sourceLang.value = data.session.source_lang || 'ko'
-    targetLang.value = data.session.target_lang || 'zh'
-    bidirectional.value = data.session.bidirectional !== false
+    applyPlan(sessionPlan(data.session))
     glossaryTerms.value = glossary.data?.terms || []
     notes.value = data.session.notes || ''
     segments.value = (data.segments || []).map(segmentFromRecord)
@@ -194,14 +222,19 @@ export const useSessionStore = defineStore('session', () => {
     finalizeWarning.value = false
   }
 
-  // Bidirectional is sent only when given, so older callers keep their exact PATCH body.
+  // Bidirectional is sent only when given, so older callers keep their exact PATCH body;
+  // options.plan sends the whole language plan instead.
   async function updatePreparedSession(name, terms, source, target, options = {}) {
     if (!currentSessionId.value || recordingStatus.value !== 'prepared') throw new Error('只能修改尚未录音的课堂')
+    const requested = planOption(options)
     const mode = bidirectionalOption(options)
-    const changes = { name, source_lang: source, target_lang: target }
-    if (mode !== undefined) changes.bidirectional = mode
+    const changes = requested
+      ? { name, ...planRequestFields(requested) }
+      : { name, source_lang: source, target_lang: target }
+    if (!requested && mode !== undefined) changes.bidirectional = mode
+    let response
     try {
-      await axios.patch(`/api/sessions/${currentSessionId.value}`, changes)
+      response = await axios.patch(`/api/sessions/${currentSessionId.value}`, changes)
       await axios.put(`/api/sessions/${currentSessionId.value}/glossary`, { terms })
     } catch (error) {
       await loadPreparedSession(currentSessionId.value).catch(() => {})
@@ -209,9 +242,8 @@ export const useSessionStore = defineStore('session', () => {
     }
     sessionName.value = name
     glossaryTerms.value = terms
-    sourceLang.value = source
-    targetLang.value = target
-    if (mode !== undefined) bidirectional.value = mode
+    const kept = requested ?? planFromLegacy(source, target, mode ?? bidirectional.value)
+    applyPlan(planFromResponse(response?.data, kept))
   }
 
   function handleMessage(sessionId, event) {
@@ -241,14 +273,16 @@ export const useSessionStore = defineStore('session', () => {
       segments.value = segments.value.map(s => (fixes.has(s.id) ? { ...s, speaker: fixes.get(s.id) } : s))
       return
     }
-    const idx = segments.value.findIndex(s => s.id === data.id)
+    // A server without per-target fields sends only `zh`: give it targets/translations too.
+    const update = withTranslationFields(data)
+    const idx = segments.value.findIndex(s => s.id === update.id)
     if (idx >= 0) {
       // stale interim arriving after translating/done → silently discard;
-      // a null speaker/lang/time never erases a known one
-      const merged = mergeSegmentUpdate(segments.value[idx], data)
+      // a null speaker/lang/time never erases a known one; the translations snapshot replaces the old one
+      const merged = mergeSegmentUpdate(segments.value[idx], update)
       if (merged) segments.value[idx] = merged
     } else {
-      segments.value.push({ ...data, is_starred: false })
+      segments.value.push({ ...update, is_starred: false })
     }
   }
 
@@ -618,9 +652,7 @@ export const useSessionStore = defineStore('session', () => {
     segments.value = []
     polishChunks.value = []
     glossaryTerms.value = []
-    sourceLang.value = 'ko'
-    targetLang.value = 'zh'
-    bidirectional.value = true
+    applyPlan(DEFAULT_PLAN)
     speakers.value = {}
     outline.value = null
     recordingStatus.value = 'idle'
@@ -639,7 +671,7 @@ export const useSessionStore = defineStore('session', () => {
 
   return {
     currentSessionId, sessionName, segments, polishChunks, glossaryTerms, sourceLang, targetLang,
-    bidirectional, speakers, outline,
+    bidirectional, languages, extraLanguages, displayLanguages, plan, speakers, outline,
     recordingStatus, recordingInfo, isRecording, isConnected,
     isFinalizing, finalizeWarning, isPaused, isLive, pauseReason, reconnectAttempt, resumeOnOpen,
     elapsedMs, elapsedFormatted, notes,

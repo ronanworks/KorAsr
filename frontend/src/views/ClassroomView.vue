@@ -8,9 +8,7 @@
         :finalize-warning="store.finalizeWarning"
         :session-name="store.sessionName"
         :elapsed-formatted="store.elapsedFormatted"
-        :source-lang="store.sourceLang"
-        :target-lang="store.targetLang"
-        :bidirectional="store.bidirectional"
+        :plan="store.plan"
         :recording-status="store.recordingStatus"
         :recording-info="store.recordingInfo"
         :session-id="store.currentSessionId"
@@ -43,8 +41,7 @@
           <div class="live-heading">
             <p class="eyebrow">LIVE TRANSLATION</p>
             <h1>{{ isMobile && auxiliaryPanel ? auxiliaryPanelLabel : '实时字幕' }}</h1>
-            <p v-if="store.bidirectional">自动识别{{ languageLabel(store.sourceLang) }}和{{ languageLabel(store.targetLang) }}发言并互译。已确定的句子会保存在课堂记录中。</p>
-            <p v-else>{{ languageLabel(store.sourceLang) }}原文与{{ languageLabel(store.targetLang) }}译文持续更新。已确定的句子会保存在课堂记录中。</p>
+            <p>{{ planDirections(store.plan) }}。已确定的句子会保存在课堂记录中。</p>
           </div>
           <div class="panel-controls" role="group" aria-label="课堂视图">
             <button :class="{ selected: !auxiliaryPanel }" :aria-pressed="!auxiliaryPanel" @click="auxiliaryPanel = null">字幕</button>
@@ -55,16 +52,14 @@
         </header>
         <div class="live-body" :class="{ 'with-panel': auxiliaryPanel }">
           <section class="transcript-panel" aria-label="实时双语字幕">
-            <TranscriptFeed :segments="store.segments" :source-lang="store.sourceLang" :target-lang="store.targetLang" :speakers="store.speakers" @star="store.toggleStar" @rename-speaker="onRenameSpeaker" />
+            <TranscriptFeed :segments="store.segments" :plan="store.plan" :speakers="store.speakers" @star="store.toggleStar" @rename-speaker="onRenameSpeaker" />
           </section>
           <aside v-if="auxiliaryPanel" class="auxiliary-panel" :aria-label="auxiliaryPanelLabel">
             <div class="auxiliary-top"><strong>{{ auxiliaryPanelLabel }}</strong><button @click="auxiliaryPanel = null">{{ isMobile ? '返回字幕' : '关闭面板' }}</button></div>
             <PolishFeed
               v-if="auxiliaryPanel === 'polish'"
               :chunks="store.polishChunks"
-              :source-lang="store.sourceLang"
-              :target-lang="store.targetLang"
-              :bidirectional="store.bidirectional"
+              :plan="store.plan"
               :speakers="store.speakers"
               :outline="store.outline"
               :show-header="false"
@@ -85,7 +80,7 @@
         <p>字幕、精修译文、笔记与录音保存在课堂记录中。录音文件会长期保留，需手动删除。</p>
         <div class="completion-meta">
           <span>{{ store.sessionName }}</span>
-          <span>{{ sessionDirectionLabel(store.sourceLang, store.targetLang, store.bidirectional) }}</span>
+          <span>{{ planLabel(store.plan) }}</span>
           <span>录音 {{ store.elapsedFormatted }}</span>
         </div>
         <p v-if="micError" class="mic-error-inline" role="alert">{{ micError }}</p>
@@ -101,7 +96,7 @@
       <div class="prep-heading">
         <p class="eyebrow">CLASSROOM SETUP</p>
         <h1>准备这节课</h1>
-        <p>先确定语言方向和术语，再上传讲义。录音开始后，这些材料会辅助后续翻译。</p>
+        <p>先确定课堂语言、显示语言和术语，再上传讲义。录音开始后，这些材料会辅助后续翻译。</p>
       </div>
       <div class="prep-grid">
         <div class="prep-main">
@@ -110,17 +105,37 @@
             <form @submit.prevent="savePreparation">
               <label for="class-name">课堂名称</label>
               <input id="class-name" v-model.trim="newSessionName" required maxlength="120" placeholder="例如：周一的经济学课" />
-              <div class="language-fields">
-                <div><label for="class-source">原文语言</label><select id="class-source" v-model="newSourceLang"><option value="ko">韩语</option><option value="zh">中文</option></select></div>
-                <div><label for="class-target">翻译为</label><select id="class-target" v-model="newTargetLang"><option v-for="lang in targetOptions" :key="lang" :value="lang">{{ languageLabel(lang) }}</option></select></div>
-              </div>
-              <label class="processing-toggle" for="class-bidirectional">
-                <input id="class-bidirectional" v-model="newBidirectional" type="checkbox" :disabled="starting" aria-describedby="class-bidirectional-help" />
-                <span><strong>自动识别双语</strong><small id="class-bidirectional-help">{{ bidirectionalHelper }}</small></span>
-              </label>
+              <fieldset class="plan-fields" :disabled="starting">
+                <legend>课堂语言</legend>
+                <div class="language-fields">
+                  <div><label for="class-main">主讲语言</label><select id="class-main" v-model="mainLang"><option v-for="lang in LANGUAGE_CODES" :key="lang" :value="lang">{{ languageLabel(lang) }}</option></select></div>
+                  <div><label for="class-second">常用第二语言</label><select id="class-second" v-model="secondLang"><option value="">无</option><option v-for="lang in secondOptions" :key="lang" :value="lang">{{ languageLabel(lang) }}</option></select></div>
+                </div>
+                <div class="chip-group" role="group" aria-labelledby="class-extra-label" aria-describedby="class-extra-help">
+                  <span id="class-extra-label" class="chip-label">偶尔出现</span>
+                  <label v-for="lang in extraOptions" :key="lang" class="chip" :class="{ selected: extraLangs.includes(lang) }">
+                    <input type="checkbox" :checked="extraLangs.includes(lang)" :disabled="!extraLangs.includes(lang) && extraLangs.length >= MAX_EXTRA_LANGUAGES" @change="toggleExtra(lang)" />{{ languageLabel(lang) }}
+                  </label>
+                </div>
+                <p id="class-extra-help" class="helper">最多 {{ MAX_EXTRA_LANGUAGES }} 种。只在明确听出这种语言时切换，适合个别同学的发言。</p>
+              </fieldset>
+              <fieldset class="plan-fields" :disabled="starting">
+                <legend>显示语言</legend>
+                <div class="language-fields">
+                  <div><label for="class-reading">阅读语言</label><select id="class-reading" v-model="readingLang"><option v-for="lang in readingOptions" :key="lang" :value="lang">{{ languageLabel(lang) }}</option></select></div>
+                </div>
+                <div class="chip-group" role="group" aria-labelledby="class-also-label" aria-describedby="class-display-help">
+                  <span id="class-also-label" class="chip-label">同时显示</span>
+                  <label v-for="lang in alsoShowOptions" :key="lang" class="chip" :class="{ selected: alsoShow.includes(lang) }">
+                    <input type="checkbox" :checked="alsoShow.includes(lang)" :disabled="!alsoShow.includes(lang) && alsoShow.length >= MAX_DISPLAY_LANGUAGES - 1" @change="toggleAlsoShow(lang)" />{{ languageLabel(lang) }}
+                  </label>
+                </div>
+                <p id="class-display-help" class="helper">显示顺序：{{ formPlan.displayLanguages.map(languageLabel).join('、') }}。本分钟要点和课堂脉络用{{ languageLabel(readingLang) }}。<br />翻译方向：{{ planDirections(formPlan) }}。</p>
+              </fieldset>
+              <p v-if="planError" class="form-error" role="alert">{{ planError }}</p>
               <label for="class-glossary">术语表 <span class="optional">可选，每行一条</span></label>
               <textarea id="class-glossary" v-model="newGlossaryText" rows="3" :placeholder="sourceExample + '=' + targetExample"></textarea>
-              <p class="helper">{{ languageLabel(newSourceLang) }}术语={{ languageLabel(newTargetLang) }}指定译法；课堂中仍可补充。</p>
+              <p class="helper">{{ languageLabel(mainLang) }}术语={{ languageLabel(readingLang) }}指定译法；课堂中仍可补充。</p>
               <label class="processing-toggle" for="browser-processing">
                 <input id="browser-processing" v-model="browserProcessingEnabled" type="checkbox" :disabled="starting" />
                 <span><strong>浏览器降噪与回声消除</strong><small>默认开启。实际效果取决于设备；自动增益会请求关闭。</small></span>
@@ -151,13 +166,13 @@
           <section v-if="pausedClasses.length" class="surface drafts-card">
             <h2>继续已暂停的课堂</h2>
             <button v-for="item in pausedClasses" :key="item.id" class="draft-choice" :disabled="starting || preparing || resuming" @click="continuePausedClass(item.id)">
-              <strong>{{ item.name }}</strong><span>已录 {{ formatAudioTime((item.duration_seconds || 0) * 1000) }} · {{ sessionDirectionLabel(item.source_lang, item.target_lang, item.bidirectional) }}</span>
+              <strong>{{ item.name }}</strong><span>已录 {{ formatAudioTime((item.duration_seconds || 0) * 1000) }} · {{ planLabel(sessionPlan(item)) }}</span>
             </button>
           </section>
           <section v-if="drafts.length" class="surface drafts-card">
             <h2>继续未开录的课堂</h2>
             <button v-for="draft in drafts" :key="draft.id" class="draft-choice" :class="{ active: draft.id === store.currentSessionId }" :disabled="starting || preparing" @click="selectDraft(draft.id)">
-              <strong>{{ draft.name }}</strong><span>{{ sessionDirectionLabel(draft.source_lang, draft.target_lang, draft.bidirectional) }}</span>
+              <strong>{{ draft.name }}</strong><span>{{ planLabel(sessionPlan(draft)) }}</span>
             </button>
           </section>
         </aside>
@@ -167,7 +182,7 @@
     <div v-if="showGlossaryModal" class="modal-backdrop" @click.self="closeGlossaryModal" @keydown.esc.stop="closeGlossaryModal">
       <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="glossary-title">
         <h2 id="glossary-title">本节课术语表</h2>
-        <p>每行“{{ languageLabel(store.sourceLang) }}术语={{ languageLabel(store.targetLang) }}译法”。新术语只影响后续字幕。</p>
+        <p>每行“{{ languageLabel(store.plan.languages[0]) }}术语={{ languageLabel(store.plan.displayLanguages[0]) }}译法”。新术语只影响后续字幕。</p>
         <textarea id="editing-glossary" v-model="editingGlossaryText" rows="8" placeholder="原文术语=指定译法"></textarea>
         <p v-if="glossaryError" class="form-error" role="alert">{{ glossaryError }}</p>
         <div class="modal-actions">
@@ -188,7 +203,10 @@ import TranscriptFeed from '../components/TranscriptFeed.vue'
 import PolishFeed from '../components/PolishFeed.vue'
 import NotesPad from '../components/NotesPad.vue'
 import MaterialsPanel from '../components/MaterialsPanel.vue'
-import { languageLabel, sessionDirectionLabel, TARGETS_BY_SOURCE } from '../utils/languages.js'
+import {
+  DEFAULT_PLAN, LANGUAGE_CODES, MAX_DISPLAY_LANGUAGES, MAX_EXTRA_LANGUAGES,
+  languageLabel, planDirections, planLabel, sessionPlan, validatePlan,
+} from '../utils/languages.js'
 import { formatAudioTime } from '../utils/polish.js'
 
 const store = useSessionStore()
@@ -275,18 +293,56 @@ function togglePanel(panel) {
 const today = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' })
 const newSessionName = ref(`课堂 · ${today}`)
 const newGlossaryText = ref('')
-const newSourceLang = ref('ko')
-const newTargetLang = ref('zh')
-const newBidirectional = ref(true)
-const bidirectionalHelper = computed(() => newBidirectional.value
-  ? `检测到${languageLabel(newTargetLang.value)}发言时，自动翻译成${languageLabel(newSourceLang.value)}。`
-  : `关闭时全部按${languageLabel(newSourceLang.value)}识别，翻译成${languageLabel(newTargetLang.value)}。`)
-const targetOptions = computed(() => TARGETS_BY_SOURCE[newSourceLang.value] || [])
-const sourceExample = computed(() => newSourceLang.value === 'ko' ? '선물' : '期货')
-const targetExample = computed(() => ({ ko: '선물', zh: '期货', en: 'futures', ru: 'фьючерсы' })[newTargetLang.value])
-watch(newSourceLang, () => {
-  if (!targetOptions.value.includes(newTargetLang.value)) newTargetLang.value = targetOptions.value[0]
+
+// Language plan form (contract 2026-10-05): frequent languages (main + optional second),
+// occasional languages, reading language + other display languages in the order chosen.
+const mainLang = ref(DEFAULT_PLAN.languages[0])
+const secondLang = ref(DEFAULT_PLAN.languages[1] || '')
+const extraLangs = ref([...DEFAULT_PLAN.extraLanguages])
+const readingLang = ref(DEFAULT_PLAN.displayLanguages[0])
+const alsoShow = ref(DEFAULT_PLAN.displayLanguages.slice(1))
+const formPlan = computed(() => ({
+  languages: [mainLang.value, secondLang.value].filter(Boolean),
+  extraLanguages: [...extraLangs.value],
+  displayLanguages: [readingLang.value, ...alsoShow.value],
+}))
+const planError = computed(() => validatePlan(formPlan.value))
+const secondOptions = computed(() => LANGUAGE_CODES.filter(lang => lang !== mainLang.value))
+const extraOptions = computed(() => LANGUAGE_CODES.filter(lang => lang !== mainLang.value && lang !== secondLang.value))
+const readingOptions = computed(() => LANGUAGE_CODES.filter(lang => lang !== mainLang.value))
+const alsoShowOptions = computed(() => LANGUAGE_CODES.filter(lang => lang !== readingLang.value))
+function toggleExtra(lang) {
+  if (extraLangs.value.includes(lang)) extraLangs.value = extraLangs.value.filter(code => code !== lang)
+  else if (extraLangs.value.length < MAX_EXTRA_LANGUAGES) extraLangs.value = [...extraLangs.value, lang]
+}
+function toggleAlsoShow(lang) {
+  if (alsoShow.value.includes(lang)) alsoShow.value = alsoShow.value.filter(code => code !== lang)
+  else if (alsoShow.value.length < MAX_DISPLAY_LANGUAGES - 1) alsoShow.value = [...alsoShow.value, lang]
+}
+// Keep the form a valid plan while one field changes.
+watch(mainLang, main => {
+  if (secondLang.value === main) secondLang.value = ''
+  extraLangs.value = extraLangs.value.filter(code => code !== main)
+  if (readingLang.value === main) {
+    readingLang.value = alsoShow.value.find(code => code !== main) || LANGUAGE_CODES.find(code => code !== main)
+  }
 })
+watch(secondLang, second => {
+  if (second) extraLangs.value = extraLangs.value.filter(code => code !== second)
+})
+watch(readingLang, reading => {
+  alsoShow.value = alsoShow.value.filter(code => code !== reading)
+})
+function setPlanForm(plan) {
+  mainLang.value = plan.languages[0]
+  secondLang.value = plan.languages[1] || ''
+  extraLangs.value = [...plan.extraLanguages]
+  readingLang.value = plan.displayLanguages[0]
+  alsoShow.value = plan.displayLanguages.slice(1)
+}
+const TERM_EXAMPLES = { ko: '선물', zh: '期货', en: 'futures', ru: 'фьючерсы' }
+const sourceExample = computed(() => TERM_EXAMPLES[mainLang.value] || '原词')
+const targetExample = computed(() => TERM_EXAMPLES[readingLang.value] || '译法')
 const drafts = ref([])
 const pausedClasses = ref([])
 const materialsCount = ref(0)
@@ -348,9 +404,7 @@ function formatGlossary(terms) {
 }
 function syncDraftForm() {
   newSessionName.value = store.sessionName
-  newSourceLang.value = store.sourceLang
-  newTargetLang.value = store.targetLang
-  newBidirectional.value = store.bidirectional
+  setPlanForm(store.plan)
   newGlossaryText.value = formatGlossary(store.glossaryTerms)
 }
 async function refreshDrafts() {
@@ -402,14 +456,19 @@ async function savePreparation() {
     prepError.value = '请输入课堂名称。'
     return
   }
+  if (planError.value) {
+    prepError.value = planError.value
+    return
+  }
   preparing.value = true
   try {
-    const mode = { bidirectional: newBidirectional.value }
+    const plan = formPlan.value
+    const option = { plan }
     if (isPrepared.value) {
-      await store.updatePreparedSession(newSessionName.value.trim(), terms, newSourceLang.value, newTargetLang.value, mode)
+      await store.updatePreparedSession(newSessionName.value.trim(), terms, plan.languages[0], plan.displayLanguages[0], option)
       prepMessage.value = '课堂设置已保存。'
     } else {
-      await store.prepareSession(newSessionName.value.trim(), terms, newSourceLang.value, newTargetLang.value, mode)
+      await store.prepareSession(newSessionName.value.trim(), terms, plan.languages[0], plan.displayLanguages[0], option)
       prepMessage.value = '课堂已保存，现在可以上传材料。'
     }
     await refreshDrafts()
@@ -423,9 +482,7 @@ function newClass() {
   stopMicrophone()
   store.resetSession()
   newSessionName.value = `课堂 · ${today}`
-  newSourceLang.value = 'ko'
-  newTargetLang.value = 'zh'
-  newBidirectional.value = true
+  setPlanForm(DEFAULT_PLAN)
   newGlossaryText.value = ''
   micError.value = ''
   speakerError.value = ''
@@ -452,6 +509,11 @@ async function beginRecording() {
     prepError.value = '请输入课堂名称。'
     return
   }
+  if (planError.value) {
+    prepError.value = planError.value
+    return
+  }
+  const plan = formPlan.value
   const attempt = ++startAttempt
   let connected = false
   starting.value = true
@@ -463,9 +525,9 @@ async function beginRecording() {
     // AudioContext before awaiting any server call.
     await prepareMicrophone(browserProcessingEnabled.value)
     if (attempt !== startAttempt || viewUnmounted) { stopMicrophone(); return }
+    // The plan is sent again: the PATCH must not fall back to legacy fields before recording.
     await store.updatePreparedSession(
-      newSessionName.value.trim(), terms, newSourceLang.value, newTargetLang.value,
-      { bidirectional: newBidirectional.value },
+      newSessionName.value.trim(), terms, plan.languages[0], plan.displayLanguages[0], { plan },
     )
     if (attempt !== startAttempt || viewUnmounted) { stopMicrophone(); return }
     await store.startRecording(store.currentSessionId)
@@ -758,6 +820,15 @@ async function onSummary() {
 .optional { color: var(--text-muted); font-weight: 450; }
 .language-fields { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; margin-top: .5rem; }
 .language-fields > div { display: grid; gap: .4rem; min-width: 0; }
+.plan-fields { display: grid; gap: .45rem; margin: .8rem 0 0; padding: .75rem .85rem .55rem; border: 1px solid var(--border); border-radius: 12px; background: #f9fbfd; min-width: 0; }
+.plan-fields legend { padding: 0 .3rem; font-size: .87rem; font-weight: 720; }
+.plan-fields .language-fields { margin-top: 0; }
+.chip-group { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+.chip-label { font-size: .8rem; color: var(--text-muted); margin-right: .2rem; }
+.chip { display: inline-flex; align-items: center; gap: .3rem; min-height: 36px; padding: .25rem .65rem; border: 1px solid var(--border); border-radius: 999px; background: #fff; font-size: .82rem; cursor: pointer; }
+.chip.selected { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 650; }
+.chip input { margin: 0; accent-color: var(--accent); }
+.plan-fields .helper { margin: 0; }
 .helper { font-size: .78rem; color: var(--text-muted); margin: .1rem 0 .3rem; line-height: 1.5; }
 .processing-toggle { display: flex; align-items: start; gap: .7rem; border: 1px solid var(--border); border-radius: 12px; background: #f9fbfd; padding: .75rem .85rem; margin-top: .8rem; cursor: pointer; }
 .processing-toggle input { flex: none; height: 18px; width: 18px; margin: .18rem 0 0; accent-color: var(--accent); }

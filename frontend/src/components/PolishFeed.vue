@@ -2,9 +2,9 @@
   <div class="polish-feed">
     <div v-if="showHeader" class="header">
       <span class="title">精修译文</span>
-      <span class="language-pair">{{ sessionDirectionLabel(sourceLang, targetLang, bidirectional) }}</span>
+      <span class="language-pair" :title="planDirections(plan)">{{ planLabel(plan) }}</span>
     </div>
-    <OutlinePanel :outline="outline" :lang="targetLang" />
+    <OutlinePanel :outline="outline" :lang="plan.displayLanguages[0]" />
     <div class="chunks" ref="chunksEl">
       <div v-if="chunks.length === 0" class="empty">
         课堂开始后，每约 60 秒生成一段精修译文和本分钟要点。
@@ -13,8 +13,7 @@
         v-for="c in chunks"
         :key="c.id"
         :chunk="c"
-        :source-lang="sourceLang"
-        :target-lang="targetLang"
+        :plan="plan"
         :speakers="speakers"
         @rename-speaker="(index, name) => emit('rename-speaker', index, name)"
       />
@@ -26,13 +25,11 @@
 import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import PolishCard from './PolishCard.vue'
 import OutlinePanel from './OutlinePanel.vue'
-import { sessionDirectionLabel } from '../utils/languages.js'
+import { DEFAULT_PLAN, planDirections, planLabel } from '../utils/languages.js'
 const props = defineProps({
   chunks: { type: Array, default: () => [] },
-  sourceLang: String,
-  targetLang: String,
+  plan: { type: Object, default: () => DEFAULT_PLAN },
   showHeader: { type: Boolean, default: true },
-  bidirectional: { type: Boolean, default: false },
   speakers: { type: Object, default: () => ({}) },
   outline: { type: Object, default: null },
 })

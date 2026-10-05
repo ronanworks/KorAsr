@@ -15,7 +15,7 @@
 
     <section v-if="points.length" class="points" :aria-label="`${windowLabel} 本分钟要点`">
       <h4>本分钟要点</h4>
-      <ul :lang="targetLang">
+      <ul :lang="readingLang">
         <li v-for="(point, i) in points" :key="i">{{ point }}</li>
       </ul>
     </section>
@@ -31,22 +31,32 @@
             :editable="editableSpeakers"
             @rename="(index, name) => emit('rename-speaker', index, name)"
           />
-          <DirectionBadge :lang="run.lang" :target-lang="run.targetLang" :session-source="sourceLang" :session-target="targetLang" />
+          <DirectionBadge :lang="run.lang" :targets="run.targets" :target-lang="run.targetLang" :plan="plan" />
         </div>
-        <p v-if="run.translation" class="run-translation" :lang="runLangs(run).target">{{ run.translation }}</p>
+        <!-- One line per target language; several targets get a language tag. -->
         <p
-          v-if="run.source && (showSource || !run.translation)"
+          v-for="line in runTranslationLines(run)"
+          :key="line.lang || 'translation'"
+          class="run-translation"
+          :class="{ tagged: run.targets.length > 1 }"
+          :lang="line.lang || readingLang"
+        >
+          <span v-if="run.targets.length > 1 && line.lang" class="target-tag" :title="languageLabel(line.lang)">{{ shortLanguageLabel(line.lang) }}</span>
+          <span>{{ line.text }}</span>
+        </p>
+        <p
+          v-if="run.source && (showSource || !hasTranslation(run))"
           class="run-source"
-          :class="{ alone: !run.translation }"
-          :lang="runLangs(run).spoken"
+          :class="{ alone: !hasTranslation(run) }"
+          :lang="run.lang || mainLang"
         >{{ run.source }}</p>
       </li>
     </ol>
     <template v-else>
-      <div class="chunk-zh" :lang="targetLang">{{ chunk.zh }}</div>
+      <div class="chunk-zh" :lang="readingLang">{{ chunk.zh }}</div>
       <details v-if="chunk.ko" class="chunk-ko">
-        <summary>查看{{ languageLabel(sourceLang) }}原文</summary>
-        <div :lang="sourceLang">{{ chunk.ko }}</div>
+        <summary>查看{{ languageLabel(mainLang) }}原文</summary>
+        <div :lang="mainLang">{{ chunk.ko }}</div>
       </details>
     </template>
   </article>
@@ -56,32 +66,33 @@
 import { computed, ref } from 'vue'
 import SpeakerChip from './SpeakerChip.vue'
 import DirectionBadge from './DirectionBadge.vue'
-import { directionBadge, languageLabel, resolveItemLangs } from '../utils/languages.js'
-import { isNoContentSummary, polishWindowLabel, summaryPoints } from '../utils/polish.js'
+import { DEFAULT_PLAN, itemBadge, languageLabel, shortLanguageLabel } from '../utils/languages.js'
+import { isNoContentSummary, polishWindowLabel, runTranslationLines, summaryPoints } from '../utils/polish.js'
 
-// chunk: normalizePolishChunk() output (live WS or history REST).
+// chunk: normalizePolishChunk() output (live WS or history REST); plan: the class's language plan.
 const props = defineProps({
   chunk: { type: Object, required: true },
-  sourceLang: { type: String, default: 'ko' },
-  targetLang: { type: String, default: 'zh' },
+  plan: { type: Object, default: () => DEFAULT_PLAN },
   speakers: { type: [Object, Array], default: null },
   editableSpeakers: { type: Boolean, default: true },
 })
 const emit = defineEmits(['rename-speaker'])
 
 const showSource = ref(false)
+const mainLang = computed(() => props.plan?.languages?.[0] || 'ko')
+const readingLang = computed(() => props.plan?.displayLanguages?.[0] || 'zh')
 const windowLabel = computed(() => polishWindowLabel(props.chunk))
 const isLegacy = computed(() => props.chunk.startMs == null)
 const isFallback = computed(() => props.chunk.state === 'fallback')
 const points = computed(() => summaryPoints(props.chunk.summary))
 const noContent = computed(() => isNoContentSummary(props.chunk.summary))
-const canToggleSource = computed(() => props.chunk.runs.some(run => run.source && run.translation))
+const canToggleSource = computed(() => props.chunk.runs.some(run => run.source && hasTranslation(run)))
 
-function runLangs(run) {
-  return resolveItemLangs(run.lang, run.targetLang, props.sourceLang, props.targetLang)
+function hasTranslation(run) {
+  return runTranslationLines(run).length > 0
 }
 function hasBadge(run) {
-  return directionBadge(run.lang, run.targetLang, props.sourceLang, props.targetLang) !== null
+  return itemBadge(run.lang, run.targets, props.plan) !== null
 }
 </script>
 
@@ -133,6 +144,13 @@ function hasBadge(run) {
 .run + .run { margin-top: .6rem; padding-top: .6rem; border-top: 1px dashed var(--border); }
 .run-meta { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .45rem; margin-bottom: .25rem; min-width: 0; }
 .run-translation { margin: 0; color: var(--text); font-size: 1.06rem; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.run-translation.tagged { display: flex; align-items: baseline; gap: .45rem; }
+.run-translation + .run-translation { margin-top: .2rem; }
+.target-tag {
+  flex: none; display: inline-grid; place-items: center; min-width: 1.45rem; height: 1.3rem;
+  padding: 0 .25rem; border-radius: 6px; background: var(--surface-soft); border: 1px solid var(--border);
+  color: var(--text-muted); font-size: .7rem; font-weight: 720; line-height: 1;
+}
 .run-source { margin: .25rem 0 0; color: #7a8494; font-size: .8rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .run-source.alone { margin-top: 0; color: var(--text); font-size: 1rem; }
 .chunk-zh { font-size: 1.06rem; line-height: 1.7; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -101,6 +101,7 @@ test('extended polish messages keep old fields, add window/summary/runs, and ded
   assert.deepEqual(chunk.runs[1], {
     speaker: 1, lang: 'zh', targetLang: 'ko', startMs: 196000, endMs: 199000,
     source: '老师我有问题', translation: '교수님 질문 있습니다', textOrigin: 'realtime',
+    targets: ['ko'], translations: { ko: '교수님 질문 있습니다' },
   })
 
   // An old-style message (no new fields) still works and is ordered by window.
@@ -265,4 +266,88 @@ test('relabel messages correct the speaker of already shown sentences only', asy
   receive({ status: 'relabel', segments: [{ id: 'b', speaker: 2 }, { id: 'missing', speaker: 1 }] })
   assert.deepEqual(store.segments.map(s => [s.id, s.speaker]), [['a', 0], ['b', 2]])
   assert.equal(store.segments[1].zh, '嗯你好', 'relabel keeps text and status')
+})
+
+test('an English sentence streams both targets in one card; each message is a full snapshot', async t => {
+  const { store, receive } = await liveSession(t)
+  const meta = { lang: 'en', target_lang: 'zh', targets: ['zh', 'ko'], start_ms: 1000, end_ms: 3600, speaker: 2 }
+  receive({ id: 'e1', status: 'interim', ko: 'Next...', zh: '识别中...', lang: 'en', target_lang: 'zh', targets: ['zh', 'ko'], speaker: null })
+  assert.deepEqual(store.segments[0].targets, ['zh', 'ko'])
+  receive({
+    id: 'e1', status: 'translating', ko: 'Next.', zh: '翻译中...', ...meta,
+    translations: { zh: '', ko: '' }, translation_state: { zh: 'translating', ko: 'translating' },
+  })
+  receive({
+    id: 'e1', status: 'translating', ko: 'Next.', zh: '下一', ...meta,
+    translations: { zh: '下一', ko: '다' }, translation_state: { zh: 'translating', ko: 'translating' },
+  })
+  assert.deepEqual(store.segments[0].translations, { zh: '下一', ko: '다' })
+  receive({
+    id: 'e1', status: 'done', ko: 'Next.', zh: '下一个。', ...meta,
+    translations: { zh: '下一个。', ko: null }, translation_state: { zh: 'done', ko: 'error' },
+  })
+  const [seg] = store.segments
+  assert.equal(store.segments.length, 1)
+  assert.equal(seg.status, 'done')
+  assert.deepEqual(seg.translations, { zh: '下一个。', ko: null })
+  assert.deepEqual(seg.translation_state, { zh: 'done', ko: 'error' })
+  assert.equal(seg.speaker, 2)
+  // A late snapshot of the stream cannot undo the final one.
+  receive({ id: 'e1', status: 'interim', ko: 'Ne...', speaker: null })
+  assert.equal(store.segments[0].status, 'done')
+})
+
+test('a message without translations (older server) gets them from zh', async t => {
+  const { store, receive } = await liveSession(t)
+  receive({ id: 'o1', status: 'translating', ko: '你好', zh: '翻译中...', lang: 'zh', target_lang: 'ko', speaker: 0 })
+  assert.deepEqual(store.segments[0].translations, { ko: '' })
+  receive({ id: 'o1', status: 'done', ko: '你好', zh: '안녕하세요', lang: 'zh', target_lang: 'ko', speaker: 0 })
+  assert.deepEqual(store.segments[0].targets, ['ko'])
+  assert.deepEqual(store.segments[0].translations, { ko: '안녕하세요' })
+  assert.deepEqual(store.segments[0].translation_state, { ko: 'done' })
+  assert.equal(store.segments[0].zh, '안녕하세요')
+})
+
+test('the language plan is sent on create and patch and restored on load and reset', async t => {
+  setActivePinia(createPinia())
+  const store = useSessionStore()
+  restoreGlobals(t, store)
+  const posts = []
+  const patches = []
+  const plan = { languages: ['ko', 'zh'], extraLanguages: ['en'], displayLanguages: ['zh', 'ko'] }
+  axios.post = async (url, body) => {
+    posts.push(body)
+    return { data: { id: 'p-1', ...body } }
+  }
+  axios.patch = async (url, body) => { patches.push(body); return { data: { id: 'p-1', ...body } } }
+  axios.put = async (url, body) => ({ data: { terms: body.terms } })
+
+  await store.prepareSession('Mixed', [], 'ko', 'zh', { plan })
+  assert.deepEqual(posts[0], {
+    name: 'Mixed', glossary_terms: [], source_lang: 'ko', target_lang: 'zh', bidirectional: true,
+    languages: ['ko', 'zh'], extra_languages: ['en'], display_languages: ['zh', 'ko'],
+  })
+  assert.deepEqual(store.plan, plan)
+  assert.deepEqual([store.sourceLang, store.targetLang, store.bidirectional], ['ko', 'zh', true])
+
+  const onlyChinese = { languages: ['ko'], extraLanguages: ['en'], displayLanguages: ['zh'] }
+  await store.updatePreparedSession('Mixed', [], 'ko', 'zh', { plan: onlyChinese })
+  assert.deepEqual(patches[0], {
+    name: 'Mixed', source_lang: 'ko', target_lang: 'zh', bidirectional: true,
+    languages: ['ko'], extra_languages: ['en'], display_languages: ['zh'],
+  })
+  assert.deepEqual(store.plan.displayLanguages, ['zh'])
+
+  axios.get = async url => (url.endsWith('/glossary')
+    ? { data: { terms: [] } }
+    : { data: { session: {
+      id: 'p-1', name: 'Loaded', recording_state: 'created', source_lang: 'ko', target_lang: 'zh', bidirectional: true,
+      languages: ['ko', 'zh'], extra_languages: ['en', 'ru'], display_languages: ['zh', 'ko', 'en'], live_outline: null,
+    }, segments: [], polished_chunks: [], speakers: [] } })
+  await store.loadPreparedSession('p-1')
+  assert.deepEqual(store.plan, { languages: ['ko', 'zh'], extraLanguages: ['en', 'ru'], displayLanguages: ['zh', 'ko', 'en'] })
+
+  store.resetSession()
+  assert.deepEqual(store.plan, { languages: ['ko', 'zh'], extraLanguages: [], displayLanguages: ['zh', 'ko'] })
+  assert.equal(store.bidirectional, true)
 })

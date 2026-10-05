@@ -7,16 +7,21 @@
 
 <script setup>
 import { computed } from 'vue'
-import { directionBadge } from '../utils/languages.js'
+import { itemBadge } from '../utils/languages.js'
 
-// Renders only when the item's direction differs from the session default (contract §4).
+// Renders only for items not in the class's main language, e.g. 中→韩 or 英→中·韩
+// (contract 2026-10-05 §5). `targets` falls back to the legacy single `targetLang`.
 const props = defineProps({
   lang: { type: String, default: null },
+  targets: { type: Array, default: null },
   targetLang: { type: String, default: null },
-  sessionSource: { type: String, default: null },
-  sessionTarget: { type: String, default: null },
+  plan: { type: Object, default: null },
 })
-const badge = computed(() => directionBadge(props.lang, props.targetLang, props.sessionSource, props.sessionTarget))
+const badge = computed(() => itemBadge(
+  props.lang,
+  props.targets ?? (props.targetLang ? [props.targetLang] : []),
+  props.plan,
+))
 </script>
 
 <style scoped>

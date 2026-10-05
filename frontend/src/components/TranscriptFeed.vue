@@ -16,39 +16,63 @@
           :speakers="speakers"
           @rename="(index, name) => emit('rename-speaker', index, name)"
         />
-        <DirectionBadge :lang="seg.lang" :target-lang="seg.target_lang" :session-source="sourceLang" :session-target="targetLang" />
-        <span v-if="seg.status === 'interim'">临时识别 · 可能修改</span>
-        <span v-else-if="seg.status === 'translating'">{{ languageLabel(segLangs(seg).spoken) }}已确定 · {{ languageLabel(segLangs(seg).target) }}生成中</span>
-        <span v-else-if="seg.status === 'error'">{{ languageLabel(segLangs(seg).spoken) }}已确定 · {{ languageLabel(segLangs(seg).target) }}翻译失败</span>
-        <span v-else>已确定</span>
+        <DirectionBadge :lang="seg.lang" :targets="seg.targets" :target-lang="seg.target_lang" :plan="plan" />
+        <span>{{ segmentStatusText(seg, mainLang) }}</span>
         <time v-if="seg.timestamp_ms != null">{{ formatTs(seg.timestamp_ms) }}</time>
       </div>
       <button class="star" :class="{ active: seg.is_starred }" :aria-label="seg.is_starred ? '取消重点标记' : '标记重点'" :aria-pressed="Boolean(seg.is_starred)" @click="emit('star', seg.id)">
         {{ seg.is_starred ? '★' : '☆' }}
       </button>
-      <div class="source" :lang="segLangs(seg).spoken">{{ seg.ko }}</div>
-      <div v-if="seg.zh || seg.status === 'translating'" class="target" :lang="segLangs(seg).target" :class="{ generating: seg.status === 'translating' }">{{ seg.zh || '翻译生成中…' }}</div>
+      <div class="source" :lang="seg.lang || mainLang">{{ seg.ko }}</div>
+      <!-- One line per target language, in display order; several targets get a language tag. -->
+      <div
+        v-for="(line, i) in visibleLines(seg)"
+        :key="line.lang || i"
+        class="target"
+        :class="[line.state, { tagged: isMulti(seg) }]"
+        :lang="line.lang || readingLang"
+      >
+        <span v-if="isMulti(seg) && line.lang" class="target-tag" :title="languageLabel(line.lang)">{{ shortLanguageLabel(line.lang) }}</span>
+        <span class="target-text">{{ lineText(seg, line) }}</span>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import SpeakerChip from './SpeakerChip.vue'
 import DirectionBadge from './DirectionBadge.vue'
-import { languageLabel, resolveItemLangs } from '../utils/languages.js'
+import { DEFAULT_PLAN, languageLabel, shortLanguageLabel } from '../utils/languages.js'
+import { segmentStatusText, translationLines } from '../utils/segments.js'
 const props = defineProps({
   segments: { type: Array, default: () => [] },
-  sourceLang: String,
-  targetLang: String,
+  plan: { type: Object, default: () => DEFAULT_PLAN },
   speakers: { type: Object, default: () => ({}) },
 })
 const emit = defineEmits(['star', 'rename-speaker'])
 const feedEl = ref(null)
 
-// Per-segment languages (bidirectional sessions translate either way); session pair as fallback.
-function segLangs(seg) {
-  return resolveItemLangs(seg.lang, seg.target_lang, props.sourceLang, props.targetLang)
+const mainLang = computed(() => props.plan?.languages?.[0] || 'ko')
+const readingLang = computed(() => props.plan?.displayLanguages?.[0] || 'zh')
+
+function isMulti(seg) {
+  return Array.isArray(seg.targets) && seg.targets.length > 1
+}
+
+// Interim cards keep one quiet placeholder line (several when the targets are known);
+// a finished card without anything to translate shows only its source.
+function visibleLines(seg) {
+  const lines = translationLines(seg)
+  if (seg.status === 'interim') return isMulti(seg) ? lines : lines.slice(0, 1)
+  return lines.filter(line => line.text || line.state === 'translating' || line.state === 'error')
+}
+
+function lineText(seg, line) {
+  if (line.text) return line.text
+  if (line.state === 'pending') return seg.status === 'interim' && !isMulti(seg) ? '识别中…' : '…'
+  if (line.state === 'translating') return '翻译生成中…'
+  return '翻译暂不可用'
 }
 
 // 只在用户处于"贴近底部"时自动滚；滑上去看历史就不抢锚点
@@ -68,7 +92,13 @@ function isEditingInFeed() {
   return Boolean(active && active.tagName === 'INPUT' && feedEl.value?.contains(active))
 }
 
-watch(() => [props.segments.length, props.segments.at(-1)?.ko, props.segments.at(-1)?.zh], async () => {
+// The last card grows while any of its targets streams in.
+const lastCardSignature = computed(() => {
+  const last = props.segments.at(-1)
+  if (!last) return ''
+  return [last.ko, last.zh, ...translationLines(last).map(line => line.text)].join('\u0000')
+})
+watch(() => [props.segments.length, lastCardSignature.value], async () => {
   await nextTick()
   if (feedEl.value && isAtBottom.value && !isEditingInFeed()) {
     feedEl.value.scrollTop = feedEl.value.scrollHeight
@@ -100,5 +130,14 @@ function formatTs(ms) {
 .star.active { opacity: 1; }
 .source { font-size: 1rem; font-weight: 620; line-height: 1.58; padding-right: 24px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .target { font-size: 1.08rem; color: var(--text); margin-top: .45rem; line-height: 1.62; white-space: pre-wrap; overflow-wrap: anywhere; }
-.target.generating { color: var(--text-muted); }
+.target.tagged { display: flex; align-items: baseline; gap: .45rem; }
+.target + .target.tagged { margin-top: .3rem; }
+.target.translating,.target.pending { color: var(--text-muted); }
+.target.error { color: #a3332e; font-size: .9rem; }
+.target-tag {
+  flex: none; display: inline-grid; place-items: center; min-width: 1.45rem; height: 1.3rem;
+  padding: 0 .25rem; border-radius: 6px; background: var(--surface-soft); border: 1px solid var(--border);
+  color: var(--text-muted); font-size: .7rem; font-weight: 720; line-height: 1;
+}
+.target-text { min-width: 0; }
 </style>

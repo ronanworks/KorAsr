@@ -269,10 +269,15 @@ test('a paused class opened from history shows its saved content and resumes it'
     session: {
       id: 'p-1', name: '周一的课', recording_state: 'ended', source_lang: 'ko', target_lang: 'zh',
       bidirectional: true, live_outline: '- 00:00–02:00 开场', notes: '笔记', duration_seconds: 125,
+      languages: ['ko', 'zh'], extra_languages: ['en'], display_languages: ['zh', 'ko'],
     },
     segments: [
       { id: 'a', sequence: 0, timestamp_ms: 1000, start_ms: 1000, end_ms: 3000, ko_text: '안녕', zh_text: '你好', lang: 'ko', target_lang: 'zh', speaker: 0, is_starred: true },
       { id: 'b', sequence: 1, timestamp_ms: 5000, start_ms: null, end_ms: null, ko_text: '다음', zh_text: null, lang: null, target_lang: null, speaker: null, is_starred: false },
+      {
+        id: 'c', sequence: 2, timestamp_ms: 7000, start_ms: 7000, end_ms: 8000, ko_text: 'Next.', zh_text: '下一个。', lang: 'en',
+        target_lang: 'zh', speaker: 1, is_starred: false, targets: ['zh', 'ko'], translations: { zh: '下一个。', ko: '다음.' },
+      },
     ],
     polished_chunks: [
       { id: 'c1', chunk_index: 1, start_ms: 60000, end_ms: 120000, summary: '- 二', status: 'ok', runs: [] },
@@ -300,6 +305,8 @@ test('a paused class opened from history shows its saved content and resumes it'
   assert.equal(store.segments[1].status, 'error')
   assert.equal(store.segments[1].zh, '翻译暂不可用')
   assert.equal(store.segments[1].start_ms, 5000)
+  assert.deepEqual(store.segments[2].translations, { zh: '下一个。', ko: '다음.' })
+  assert.deepEqual(store.plan, { languages: ['ko', 'zh'], extraLanguages: ['en'], displayLanguages: ['zh', 'ko'] })
   assert.deepEqual(store.polishChunks.map(c => [c.id, c.state]), [['c0', 'fallback'], ['c1', 'ok']])
   assert.equal(store.speakers[0].name, '教授')
   assert.equal(store.outline.text, '- 00:00–02:00 开场')
@@ -310,7 +317,7 @@ test('a paused class opened from history shows its saved content and resumes it'
   await store.resumeRecording()
   assert.equal(FakeWebSocket.all.at(-1).url, 'ws://localhost:5173/ws/p-1')
   assert.equal(store.recordingStatus, 'capturing')
-  assert.equal(store.segments.length, 2)
+  assert.equal(store.segments.length, 3)
   await assert.rejects(store.loadPausedSession('p-1'), /暂停或结束/, 'cannot switch classes while recording')
 })
 

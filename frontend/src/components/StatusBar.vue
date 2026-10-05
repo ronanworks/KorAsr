@@ -9,7 +9,7 @@
         <span v-else-if="frozenTimerLabel" class="timer frozen">{{ frozenTimerLabel }} · {{ elapsedFormatted }}</span>
       </div>
       <div class="session-subline">
-        <span :title="directionTitle">{{ sessionDirectionLabel(sourceLang, targetLang, bidirectional) }}</span>
+        <span :title="directionTitle">{{ planLabel(plan) }}</span>
         <span aria-hidden="true">·</span>
         <span role="status">{{ recordingText }}</span>
         <span v-if="recordingInfo?.low_disk_warning" class="storage-warning" role="alert">服务器磁盘空间不足，请及时下载并清理旧录音</span>
@@ -37,12 +37,12 @@
 
 <script setup>
 import { computed } from 'vue'
-import { languageLabel, sessionDirectionLabel } from '../utils/languages.js'
+import { DEFAULT_PLAN, planDirections, planLabel } from '../utils/languages.js'
 
 const props = defineProps({
   isRecording: Boolean, isConnected: Boolean, isFinalizing: Boolean, finalizeWarning: Boolean,
-  sessionName: String, elapsedFormatted: String, sourceLang: String, targetLang: String,
-  bidirectional: Boolean,
+  sessionName: String, elapsedFormatted: String,
+  plan: { type: Object, default: () => DEFAULT_PLAN },   // the class's language plan
   recordingStatus: String, sessionId: String, recordingInfo: Object,
   pauseReason: String, reconnectAttempt: { type: Number, default: 0 }, reconnectTotal: { type: Number, default: 3 },
   busy: Boolean,   // the view is re-acquiring the microphone for 继续
@@ -63,9 +63,8 @@ const transitionLabel = computed(() => {
   return ''
 })
 
-const directionTitle = computed(() => props.bidirectional
-  ? `自动识别双语：${languageLabel(props.sourceLang)}译成${languageLabel(props.targetLang)}，${languageLabel(props.targetLang)}发言译成${languageLabel(props.sourceLang)}`
-  : `${languageLabel(props.sourceLang)}译成${languageLabel(props.targetLang)}`)
+// e.g. "翻译方向：韩语→中文；中文→韩语；英语→中文、韩语"
+const directionTitle = computed(() => `翻译方向：${planDirections(props.plan)}`)
 
 const recordingText = computed(() => {
   switch (props.recordingStatus) {

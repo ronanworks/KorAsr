@@ -27,7 +27,7 @@
     <div class="detail" v-else>
       <div class="detail-header">
         <button @click="returnToList" class="back-btn">← 返回列表</button>
-        <div class="detail-identity"><h2>{{ selectedSession.session.name }}</h2><span>{{ directionLabel }}</span></div>
+        <div class="detail-identity"><h2>{{ selectedSession.session.name }}</h2><span :title="`翻译方向：${planDirections(plan)}`">{{ directionLabel }}</span></div>
         <button class="btn-summary" @click="triggerSummary" :disabled="summaryLoading">
           {{ summaryLoading ? '正在生成…' : '生成总结' }}
         </button>
@@ -60,14 +60,13 @@
             <h4>精修译文</h4>
             <span>基于录音重新识别和翻译 · {{ targetLabel }}</span>
           </div>
-          <OutlinePanel class="history-outline" :outline="historyOutline" :lang="targetLang" default-open :limit-height="false" />
+          <OutlinePanel class="history-outline" :outline="historyOutline" :lang="readingLang" default-open :limit-height="false" />
           <div v-if="!historyChunks.length" class="section-empty">这节课还没有精修译文。</div>
           <PolishCard
             v-for="chunk in historyChunks"
             :key="chunk.id"
             :chunk="chunk"
-            :source-lang="sourceLang"
-            :target-lang="targetLang"
+            :plan="plan"
             :speakers="historySpeakers"
             @rename-speaker="renameHistorySpeaker"
           />
@@ -81,10 +80,20 @@
             <div class="seg-head">
               <span class="seg-ts">{{ formatTs(seg.timestamp_ms) }}</span>
               <SpeakerChip v-if="seg.speaker != null" :index="seg.speaker" :speakers="historySpeakers" @rename="renameHistorySpeaker" />
-              <DirectionBadge :lang="seg.lang" :target-lang="seg.target_lang" :session-source="sourceLang" :session-target="targetLang" />
+              <DirectionBadge :lang="seg.lang" :targets="seg.targets" :target-lang="seg.target_lang" :plan="plan" />
             </div>
-            <div class="seg-ko" :lang="segLangs(seg).spoken">{{ seg.ko_text }}</div>
-            <div class="seg-zh" :lang="segLangs(seg).target">{{ seg.zh_text }}</div>
+            <div class="seg-ko" :lang="seg.lang || mainLang">{{ seg.ko_text }}</div>
+            <!-- One line per display language the sentence was translated into. -->
+            <div
+              v-for="(line, i) in savedLines(seg)"
+              :key="line.lang || i"
+              class="seg-zh"
+              :class="{ tagged: savedLines(seg).length > 1, missing: !line.text }"
+              :lang="line.lang || readingLang"
+            >
+              <span v-if="savedLines(seg).length > 1 && line.lang" class="seg-tag" :title="languageLabel(line.lang)">{{ shortLanguageLabel(line.lang) }}</span>
+              <span>{{ line.text || '翻译暂不可用' }}</span>
+            </div>
           </div>
         </div>
         <div class="summary-panel" v-if="selectedSession.session.summary">
@@ -107,8 +116,9 @@ import OutlinePanel from '../components/OutlinePanel.vue'
 import SpeakerChip from '../components/SpeakerChip.vue'
 import DirectionBadge from '../components/DirectionBadge.vue'
 import { useSessionStore } from '../stores/session'
-import { languageLabel, resolveItemLangs, sessionDirectionLabel } from '../utils/languages.js'
+import { languageLabel, planDirections, planLabel, sessionPlan, shortLanguageLabel } from '../utils/languages.js'
 import { normalizeOutline, normalizePolishChunk } from '../utils/polish.js'
+import { segmentFromRecord, translationLines } from '../utils/segments.js'
 import { normalizeSpeakerName, speakersFromList } from '../utils/speakers.js'
 
 const liveStore = useSessionStore()
@@ -128,16 +138,18 @@ function returnToList() {
   recording.value = null
   renameError.value = ''
 }
-const sourceLang = computed(() => selectedSession.value?.session?.source_lang || 'ko')
-const targetLang = computed(() => selectedSession.value?.session?.target_lang || 'zh')
-const targetLabel = computed(() => languageLabel(targetLang.value))
-const directionLabel = computed(() =>
-  sessionDirectionLabel(sourceLang.value, targetLang.value, selectedSession.value?.session?.bidirectional))
+// The server sends the plan arrays for every session (derived for classes saved before them).
+const plan = computed(() => sessionPlan(selectedSession.value?.session))
+const mainLang = computed(() => plan.value.languages[0])
+const readingLang = computed(() => plan.value.displayLanguages[0])
+const targetLabel = computed(() => languageLabel(readingLang.value))
+const directionLabel = computed(() => planLabel(plan.value))
 const historySpeakers = computed(() => speakersFromList(selectedSession.value?.speakers))
 const historyChunks = computed(() => (selectedSession.value?.polished_chunks || []).map(normalizePolishChunk))
 const historyOutline = computed(() => normalizeOutline(selectedSession.value?.session?.live_outline))
-function segLangs(seg) {
-  return resolveItemLangs(seg.lang, seg.target_lang, sourceLang.value, targetLang.value)
+// Saved translations of one sentence, display order; a sentence without targets shows none.
+function savedLines(seg) {
+  return translationLines(segmentFromRecord(seg))
 }
 const recordingStatusText = computed(() => {
   if (recordingState.value === 'loading') return '正在检查服务器上的录音…'
@@ -328,6 +340,9 @@ function formatTs(ms) {
 .seg-ts { font-size: 11px; color: #c7c7cc; }
 .seg-ko { font-size: 14px; font-weight: 600; margin-top: 3px; overflow-wrap: anywhere; }
 .seg-zh { font-size: 13px; color: #636366; margin-top: 3px; overflow-wrap: anywhere; }
+.seg-zh.tagged { display: flex; align-items: baseline; gap: 6px; }
+.seg-zh.missing { color: #a3332e; }
+.seg-tag { flex: none; min-width: 1.3rem; padding: 0 .2rem; border-radius: 5px; background: var(--surface-soft); border: 1px solid var(--border); color: var(--text-muted); font-size: 11px; font-weight: 700; text-align: center; }
 .summary-panel { width: min(320px,30vw); border-left: 1px solid var(--border); padding: 1.25rem; overflow-y: auto; background: #fff; }
 .summary-panel h4 { margin: 0 0 12px; font-size: .94rem; color: var(--accent); }
 .summary-content { font-size: 13px; line-height: 1.7; white-space: pre-wrap; margin: 0; font-family: inherit; }

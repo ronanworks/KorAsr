@@ -11,17 +11,39 @@ function textOrEmpty(value) {
   return typeof value === 'string' ? value : ''
 }
 
+// A run has a translation per target (display order); runs saved before the
+// multi-language plan have one target, `targetLang`, with `translation`.
 export function normalizePolishRun(run) {
+  const targetLang = run?.target_lang || run?.targetLang || null
+  const translation = textOrEmpty(run?.translation)
+  const targets = Array.isArray(run?.targets)
+    ? run.targets.filter(code => typeof code === 'string' && code)
+    : (targetLang ? [targetLang] : [])
+  const saved = run?.translations && typeof run.translations === 'object' ? run.translations : null
   return {
     speaker: isSpeakerIndex(run?.speaker) ? run.speaker : null,
     lang: run?.lang || null,
-    targetLang: run?.target_lang || run?.targetLang || null,
+    targetLang,
     startMs: msOrNull(run?.start_ms ?? run?.startMs),
     endMs: msOrNull(run?.end_ms ?? run?.endMs),
     source: textOrEmpty(run?.source),
-    translation: textOrEmpty(run?.translation),
+    translation,
     textOrigin: run?.text_origin ?? run?.textOrigin ?? null,
+    targets,
+    translations: Object.fromEntries(targets.map(code => [
+      code, textOrEmpty(saved ? saved[code] : (code === targetLang ? translation : '')),
+    ])),
   }
+}
+
+// [{ lang, text }] for the run's translated targets, in display order.
+export function runTranslationLines(run) {
+  const targets = Array.isArray(run?.targets) ? run.targets : []
+  const lines = targets
+    .map(lang => ({ lang, text: textOrEmpty(run?.translations?.[lang]) }))
+    .filter(line => line.text)
+  if (!lines.length && run?.translation) return [{ lang: run.targetLang ?? null, text: run.translation }]
+  return lines
 }
 
 function parseRuns(runs) {

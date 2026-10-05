@@ -2,7 +2,7 @@
   <article class="history-item" :class="{ paused: isPaused }">
     <button class="open-session" type="button" @click="$emit('select', session.id)">
       <span class="title">{{ session.name }}</span>
-      <span class="meta">{{ formatDate(session.started_at) }} · {{ sessionDirectionLabel(session.source_lang || 'ko', session.target_lang || 'zh', session.bidirectional) }}</span>
+      <span class="meta">{{ formatDate(session.started_at) }} · {{ planLabel(sessionPlan(session)) }}</span>
       <span class="meta">{{ durationText }} · {{ session.segment_count }} 段字幕</span>
     </button>
     <div class="actions">
@@ -21,7 +21,7 @@
 
 <script setup>
 import { computed } from 'vue'
-import { sessionDirectionLabel } from '../utils/languages.js'
+import { planLabel, sessionPlan } from '../utils/languages.js'
 const props = defineProps({ session: Object, busy: Boolean })
 defineEmits(['select', 'delete', 'resume', 'end'])
 const isPaused = computed(() => props.session.recording_state === 'paused')
