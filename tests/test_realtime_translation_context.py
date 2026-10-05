@@ -25,6 +25,35 @@ class RealtimeTranslationContextTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_translation_messages("invalid", source_lang="ja", target_lang="zh")
 
+    def test_every_direction_a_language_plan_can_produce_has_a_prompt(self):
+        # A multi-language class translates any classroom language into any display language
+        # (e.g. English into Chinese and Korean): all 12 ordered pairs of the four languages.
+        codes = sorted(LANGUAGE_LABELS)
+        for source_lang in codes:
+            for target_lang in codes:
+                if source_lang == target_lang:
+                    with self.assertRaises(ValueError):
+                        build_translation_messages("同一种语言", source_lang=source_lang, target_lang=target_lang)
+                    continue
+                with self.subTest(source_lang=source_lang, target_lang=target_lang):
+                    system, user = (m["content"] for m in build_translation_messages(
+                        "When you've got something.", source_lang=source_lang, target_lang=target_lang,
+                    ))
+                    self.assertIn(f"发言译成{LANGUAGE_LABELS[target_lang]}", system)
+                    self.assertIn(f"只输出这一段的{LANGUAGE_LABELS[target_lang]}", user)
+
+    def test_explanations_in_the_target_language_are_also_caught(self):
+        # Short enough to pass the length check: only the explanation words give them away.
+        from backend.translation.moonshot import sanitize_translation
+        chinese = "就是游戏主播常说的那句冲啊G"
+        korean = "원문은 게임 방송 유행어입니다.\n가자 G!"
+        self.assertEqual(sanitize_translation(chinese, korean, "zh", "ko"), "가자 G!")
+        source = "이건 게임 방송에서 자주 쓰는 말이에요 쏘랴 G"
+        english = "In this context it probably means a catchphrase.\nLet's go G!"
+        self.assertEqual(sanitize_translation(source, english, "ko", "en"), "Let's go G!")
+        self.assertEqual(sanitize_translation(source, "This is a phrase.\nThis means: let's go.", "ko", "en"),
+                         "This is a phrase. This means: let's go.")   # only "it (probably) means" is a marker
+
     def test_prior_text_and_matching_glossary_are_separate_from_current_sentence(self):
         messages = build_translation_messages(
             "선물 시장을 설명하겠습니다.",

@@ -142,7 +142,7 @@ function returnToList() {
 const plan = computed(() => sessionPlan(selectedSession.value?.session))
 const mainLang = computed(() => plan.value.languages[0])
 const readingLang = computed(() => plan.value.displayLanguages[0])
-const targetLabel = computed(() => languageLabel(readingLang.value))
+const targetLabel = computed(() => plan.value.displayLanguages.map(languageLabel).join('、'))
 const directionLabel = computed(() => planLabel(plan.value))
 const historySpeakers = computed(() => speakersFromList(selectedSession.value?.speakers))
 const historyChunks = computed(() => (selectedSession.value?.polished_chunks || []).map(normalizePolishChunk))
