@@ -333,6 +333,34 @@ def _speaker_names(session_id: str) -> dict[str, str]:
         return parse_speaker_names(getattr(sess, "speaker_names", None)) if sess else {}
 
 
+CLIENT_INFO_MAX_KEYS = 24
+CLIENT_INFO_MAX_CHARS = 200
+
+
+def _client_info_text(message: dict) -> str:
+    """The client's diagnostics message (contract §2a) as one ASCII-safe log line.
+
+    Only flat scalar fields are kept, strings clipped; nothing is stored. ASCII so a
+    console without UTF-8 can never break the receive loop over a device name.
+    """
+    info = {}
+    for key, value in message.items():
+        if key == "action" or not isinstance(key, str):
+            continue
+        if len(info) >= CLIENT_INFO_MAX_KEYS:
+            break
+        if isinstance(value, str):
+            value = value[:CLIENT_INFO_MAX_CHARS]
+        elif not (value is None or isinstance(value, (bool, int, float))):
+            continue
+        info[key[:40]] = value
+    return json.dumps(info, ensure_ascii=True)
+
+
+def _ms_since(started: float) -> int:
+    return int((time.perf_counter() - started) * 1000)
+
+
 def _append_context(current: str, new_text: str) -> str:
     """Append new_text to rolling context, trimming to MAX_CONTEXT_CHARS from the left."""
     combined = (current + " " + new_text).strip()
@@ -457,8 +485,12 @@ async def handle_ws(websocket: WebSocket, session_id: str):
     inflight_starts: dict[str, int] = {}
     if len(plan.spoken) == 1:
         last_lang: str | None = source_lang
+    elif resume:
+        # A resumed connection starts from the class's main language, not from the last
+        # sentence before the break: that language is a stale hint after a pause.
+        last_lang = source_lang
     else:
-        last_lang = resume["last_lang"] if resume and resume["last_lang"] in plan.spoken else None
+        last_lang = None
     # A pause is a real gap: no speaker continuity across it.
     last_speaker_end_ms: int | None = None
     # Boundary de-duplication after a forced cut: the last final text per language.
@@ -561,9 +593,20 @@ async def handle_ws(websocket: WebSocket, session_id: str):
     # ── 单段 final segment 处理（语言识别 → 识别 → 说话人 → 存原文 → 翻译 → 更新 DB → 推 WS）
     async def _process_final(
         audio, seg_id, span, s_id, seq_num, context, send_ws=True, continuation=False, ends_forced=False,
+        committed_at=None,
     ):
         nonlocal rolling_context, last_lang
         start_ms, end_ms = span
+        committed_at = time.perf_counter() if committed_at is None else committed_at
+
+        def _log_timing(outcome: str, translating_ms: int | None, targets=()) -> None:
+            """Latency of this sentence from its cut (commit) to each message, measured
+            where the message is sent (also when nobody is listening)."""
+            print(
+                f"[WS final ] seg={seg_id[:8]} timing "
+                f"commit->translating={'-' if translating_ms is None else f'{translating_ms}ms'} "
+                f"commit->{outcome}={_ms_since(committed_at)}ms targets={','.join(targets) or '-'}"
+            )
 
         rms = float(np.sqrt(np.mean(audio**2))) if len(audio) else 0.0
         print(
@@ -589,6 +632,7 @@ async def handle_ws(websocket: WebSocket, session_id: str):
             print(f"[WS final ] seg={seg_id[:8]} EMPTY -> removing card")
             if send_ws:
                 await _safe_send({"id": seg_id, "status": "remove"})
+            _log_timing("remove", None)
             return
         last_lang = lang
         # Every display language except the spoken one, in display order; the first is
@@ -641,10 +685,12 @@ async def handle_ws(websocket: WebSocket, session_id: str):
             # Spoken in the only display language: nothing to translate.
             if push["send"]:
                 await _safe_send(_message("done", ""))
+            _log_timing("done", None)
             return
 
         if push["send"]:
             push["send"] = await _safe_send(_message("translating", "翻译中..."))
+        translating_ms = _ms_since(committed_at)
 
         # 流式翻译：每个目标语言一个并行调用，边收 token 边推 WS；节流：每 100ms 最多推一次，带所有目标
         try:
@@ -710,17 +756,19 @@ async def handle_ws(websocket: WebSocket, session_id: str):
 
         # DB 更新完成后才推终态。发送失败只影响在线展示，不影响历史记录。
         # done = at least one target translated (failed ones are "error" in translation_state).
+        final_status = "done" if any(translations.values()) else "error"
         if push["send"]:
-            await _safe_send(_message(
-                "done" if any(translations.values()) else "error",
-                primary_text or "翻译暂不可用",
-                translations,
-            ))
+            await _safe_send(_message(final_status, primary_text or "翻译暂不可用", translations))
+        _log_timing(final_status, translating_ms, targets)
 
     def _schedule_final(audio, seg_id, span, seq_num, context, send_ws=True, continuation=False, ends_forced=False):
         inflight_starts[seg_id] = span[0]
+        committed_at = time.perf_counter()   # called right after transcriber.commit()
         task = asyncio.create_task(
-            _process_final(audio, seg_id, span, session_id, seq_num, context, send_ws, continuation, ends_forced)
+            _process_final(
+                audio, seg_id, span, session_id, seq_num, context, send_ws, continuation, ends_forced,
+                committed_at=committed_at,
+            )
         )
         final_tasks.add(task)
 
@@ -787,6 +835,11 @@ async def handle_ws(websocket: WebSocket, session_id: str):
             f"languages={'/'.join(candidates)} extra={'/'.join(extra_languages) or '-'} "
             f"display={'/'.join(plan.display)} speakers={'on' if embedder else 'off'}"
         )
+        if resuming and len(plan.spoken) > 1:
+            print(
+                f"[WS] Session {session_id[:8]} language hint starts at {last_lang} "
+                f"(last sentence before the pause: {resume['last_lang'] or '-'})"
+            )
         if embedder is not None:
             # Per-minute diarization shares this tracker, so its corrections keep the same numbers.
             polish.attach_speakers(SpeakerHooks(speaker_tracker, speaker_lock, embedder, _speakers_changed))
@@ -903,6 +956,10 @@ async def handle_ws(websocket: WebSocket, session_id: str):
                 except json.JSONDecodeError:
                     continue
                 action = ctrl.get("action") if isinstance(ctrl, dict) else None
+                if action == "client_info":
+                    # Browser and microphone diagnostics (contract §2a): logged, never stored.
+                    print(f"[WS] client_info session={session_id[:8]} {_client_info_text(ctrl)}")
+                    continue
                 if action in ("stop", "pause"):
                     end_mode = action
                     print(f"[WS] Session {session_id} {action} signal received")

@@ -3,6 +3,7 @@
 import asyncio
 import importlib.util
 import json
+import re
 import sys
 import tempfile
 import types
@@ -747,7 +748,9 @@ class PauseResumeTests(_HandlerTestCase):
         new = next(s for s in self.db.segments.values() if s.id != "old")
         self.assertEqual(new.sequence, 5)
         self.assertEqual((new.timestamp_ms, new.start_ms, new.end_ms), (2000, 2000, 3000))
-        self.assertEqual(previous_languages[0], "zh")   # language hint from the last saved sentence
+        # After a break the language hint starts from the main language, not from the
+        # last sentence before the pause (Chinese here).
+        self.assertEqual(previous_languages[0], "ko")
         self.assertEqual(_Pipeline.instances[-1].restore_calls, [2000])
         self.assertEqual(_Tracker.instances[-1].loaded["weights"], [3.0, 2.0])
         self.assertEqual(ws.sent[0]["speakers"], [{"index": 0, "name": None}, {"index": 1, "name": None}])
@@ -861,6 +864,85 @@ class PauseResumeTests(_HandlerTestCase):
 
         texts_saved = [seg.ko_text for seg in sorted(self.db.segments.values(), key=lambda seg: seg.sequence)]
         self.assertEqual(texts_saved, ["이야기 정말 하고 싶었어요.", "아 그랬어요?"])
+
+
+class ObservabilityTests(_HandlerTestCase):
+    """client_info diagnostics and per-sentence latency go to the log only."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.logs = []
+        self.handler.print = lambda *args, **_kwargs: self.logs.append(" ".join(str(a) for a in args))
+
+    async def test_client_info_is_logged_once_and_never_stored_or_answered(self):
+        self.handler.translate_stream = _translate_ok
+        info = {
+            "action": "client_info", "user_agent": "Mozilla/5.0 (Macintosh) Chrome/141.0",
+            "device_label": "마이크 배열 (Realtek)", "noise_suppression": True, "echo_cancellation": True,
+            "auto_gain_control": False, "track_sample_rate": 48000, "channel_count": 1,
+            "context_sample_rate": 16000, "capture_mode": "worklet", "browser_processing": True,
+            "queued_ms": 1792, "nested": {"dropped": True}, "long": "x" * 500,
+        }
+        ws = _WebSocket([
+            {"type": "websocket.receive", "text": json.dumps(info, ensure_ascii=False)},
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.receive", "text": '{"action":"stop"}'},
+        ])
+        await asyncio.wait_for(self.handler.handle_ws(ws, self.db.session.id), 3)
+
+        lines = [line for line in self.logs if line.startswith("[WS] client_info")]
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].isascii())          # a device name can never break the receive loop
+        logged = json.loads(lines[0].split(" ", 3)[3])
+        self.assertEqual(logged["device_label"], "마이크 배열 (Realtek)")
+        self.assertEqual((logged["capture_mode"], logged["noise_suppression"], logged["queued_ms"]),
+                         ("worklet", True, 1792))
+        self.assertNotIn("nested", logged)
+        self.assertEqual(len(logged["long"]), 200)
+        self.assertNotIn("action", logged)
+        # The class itself is unaffected: no reply, the sentence and the stop work as before.
+        self.assertTrue(all(m.get("status") != "client_info" for m in ws.sent))
+        self.assertEqual(next(iter(self.db.segments.values())).zh_text, "译文")
+        self.assertEqual(self.db.session.recording_state, "ended")
+        self.assertFalse(any("client_info" in str(value) for value in vars(self.db.session).values()))
+
+    async def test_unknown_control_messages_are_ignored(self):
+        # A newer client may send actions this server does not know; an older client sends none.
+        self.handler.translate_stream = _translate_ok
+        ws = _WebSocket([
+            {"type": "websocket.receive", "text": '{"action":"something_new","x":1}'},
+            {"type": "websocket.receive", "text": "not json"},
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.receive", "text": '{"action":"stop"}'},
+        ])
+        await asyncio.wait_for(self.handler.handle_ws(ws, self.db.session.id), 3)
+        self.assertEqual(ws.sent[-1]["status"], "done")
+        self.assertEqual(self.db.session.recording_state, "ended")
+
+    async def test_each_final_logs_its_latency_from_the_cut(self):
+        async def slow_translate(*_args):
+            await asyncio.sleep(0.12)
+            yield "译文"
+
+        texts = iter(["첫 번째 문장", ""])   # the second clip is recognised as nothing
+        self.handler.transcribe_audio = lambda *_args, **_kwargs: next(texts)
+        self.handler.translate_stream = slow_translate
+        ws = _WebSocket([
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.receive", "bytes": self.audio},
+            {"type": "websocket.receive", "text": '{"action":"stop"}'},
+        ])
+        await asyncio.wait_for(self.handler.handle_ws(ws, self.db.session.id), 3)
+
+        timings = [line for line in self.logs if " timing " in line]
+        self.assertEqual(len(timings), 2)
+        done = next(line for line in timings if "commit->done=" in line)
+        match = re.search(r"commit->translating=(\d+)ms commit->done=(\d+)ms targets=zh$", done)
+        self.assertIsNotNone(match, done)
+        translating_ms, done_ms = int(match.group(1)), int(match.group(2))
+        self.assertGreaterEqual(done_ms - translating_ms, 100)   # the 0.12 s translation
+        removed = next(line for line in timings if "commit->remove=" in line)
+        self.assertIn("commit->translating=- ", removed)
 
 
 ENGLISH = "So one day her mother starts calling her."
@@ -1052,7 +1134,7 @@ class MultiTargetTests(_HandlerTestCase):
         self.assertEqual(pipeline.languages, ("ko", "zh"))               # legacy main / reading
         self.assertEqual((pipeline.plan.frequent, pipeline.plan.extra, pipeline.plan.display),
                          (("ko", "zh"), ("en",), ("zh", "ko")))
-        self.assertEqual(seen[0][2], "en")   # an occasional language resumes as the previous language
+        self.assertEqual(seen[0][2], "ko")   # a resumed connection starts from the main language
 
 
 class ContextAndGlossaryTests(unittest.TestCase):

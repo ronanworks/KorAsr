@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 from backend.config import settings
+from backend.log_tee import TimestampedTee
 
 # Windows 控制台默认 cp1252，print 任何非 Latin-1 字符（韩文/中文/→）都会
 # UnicodeEncodeError 把整个 request handler 崩掉。强制 stdout/stderr 走 UTF-8。
@@ -33,43 +34,15 @@ for _stream in (sys.stdout, sys.stderr):
 # 文件日志 Tee：Windows 下 detached 启动（无 console / -WindowStyle Hidden）时
 # stdout/stderr 没地方可写或写完即丢，调试两眼一抹黑。把所有输出 mirror 到
 # logs/service.log，写多少都不丢；同时仍保留 console 输出（前台跑时一样可见）。
+# Every line starts with the wall-clock time ("10:53:10.718 "); see backend/log_tee.py.
 _LOG_DIR = Path(__file__).resolve().parent / "logs"
 _LOG_DIR.mkdir(exist_ok=True)
 # append 模式：保留历史方便 grep；如果太大用户自己 truncate 或加 rotation
 _LOG_FH = open(_LOG_DIR / "service.log", "a", encoding="utf-8", buffering=1)
 _LOG_FH.write(f"\n===== service start @ {__import__('datetime').datetime.now().isoformat()} =====\n")
 
-class _Tee:
-    def __init__(self, console):
-        self.console = console
-    def write(self, data):
-        try:
-            _LOG_FH.write(data)
-        except Exception:
-            pass
-        try:
-            if self.console is not None:
-                self.console.write(data)
-        except Exception:
-            pass
-        return len(data) if isinstance(data, str) else 0
-    def flush(self):
-        try: _LOG_FH.flush()
-        except Exception: pass
-        try:
-            if self.console is not None:
-                self.console.flush()
-        except Exception:
-            pass
-    def isatty(self):
-        return False
-    def fileno(self):
-        # uvicorn / libraries that probe fileno() get the log file fd; better
-        # than crashing on a missing fileno when console is None.
-        return _LOG_FH.fileno()
-
-sys.stdout = _Tee(sys.stdout)
-sys.stderr = _Tee(sys.stderr)
+sys.stdout = TimestampedTee(sys.stdout, _LOG_FH)
+sys.stderr = TimestampedTee(sys.stderr, _LOG_FH)
 
 CERT_DIR = Path("certs")
 CERT_PATH = CERT_DIR / "cert.pem"
