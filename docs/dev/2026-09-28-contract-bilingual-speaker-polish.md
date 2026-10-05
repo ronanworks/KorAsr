@@ -2,6 +2,10 @@
 
 2026-09-28 · shared spec for the backend core, speaker module and frontend work.
 
+> 2026-10-05: the session's single direction became a language plan (frequent / occasional /
+> display languages) with one translation per target. See
+> `2026-10-05-contract-multilang.md`; the fields below keep their meaning for the primary target.
+
 Field names `ko` / `zh` (WebSocket) and `ko_text` / `zh_text` (DB) are kept for
 compatibility: they always mean **spoken (source) text** and **translated text**
 of that item, whatever the actual languages are. The per-item language codes

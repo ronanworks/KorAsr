@@ -34,18 +34,19 @@ All LLM calls in tests are mocked. Never run a replay with `--llm` (paid API) wi
 Browser mic (AudioWorklet, 4096-sample blocks) ──WS /ws/{session_id}──▶ backend/ws/handler.py
   ├─ raw PCM appended to RAW_AUDIO_DIR/<session>.pcm (archive + polish source)
   ├─ Transcriber (backend/asr/transcriber.py): Silero VAD cuts ≤6 s, audio-sample clock for timestamps
-  ├─ per final sentence: language ID among the session's two languages (backend/asr/langid.py)
+  ├─ per final sentence: language ID among the class's languages (backend/asr/langid.py; frequent
+  │    languages as before, occasional ones only on clear evidence)
   │    → Whisper → hallucination filters → speaker voiceprint + online clustering (backend/speaker/)
-  │    → Segment row (spoken lang, target lang, speaker, start/end ms) → Kimi streaming translation
+  │    → Segment row (spoken lang, targets, speaker, start/end ms) → one Kimi stream per target language
   └─ PolishPipeline (backend/polish/pipeline.py), every ~60 s of settled audio:
        sentences grouped into speaker/language runs → VAD re-recognition cross-checked with live text
        → one LLM call: per-run translation + 本分钟要点 → PolishedChunk; outline every 5 windows
 ```
 
-- Bidirectional sessions (default): speech in the target language is translated back into the source language (e.g. Chinese → Korean in a Korean→Chinese class). Legacy column names `ko_text` / `zh_text` mean "spoken text" / "translation".
+- Language plan per class (backend/languages.py): `languages` (frequent, main first), `extra_languages` (occasional), `display_languages` (reading language first). Each sentence is translated into every display language except its own; the first target is the primary one. The default plan (ko,zh / – / zh,ko) is the old bidirectional class. Legacy column names `ko_text` / `zh_text` mean "spoken text" / "primary translation"; `segment.translations` holds all targets.
 - One module-level GPU semaphore serializes all Whisper work across sessions; interim previews skip when it is busy.
 - A polish window always advances even if ASR/LLM fail (falls back to live translations).
-- Frontend: Vue 3 + Pinia (`frontend/src/stores/session.js` handles WS messages); interface contract in `docs/dev/2026-09-28-contract-bilingual-speaker-polish.md`.
+- Frontend: Vue 3 + Pinia (`frontend/src/stores/session.js` handles WS messages); interface contracts in `docs/dev/2026-09-28-contract-bilingual-speaker-polish.md` and `docs/dev/2026-10-05-contract-multilang.md`.
 
 ## Important Notes
 
