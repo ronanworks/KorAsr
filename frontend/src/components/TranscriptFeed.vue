@@ -2,7 +2,7 @@
   <div class="feed-wrap">
     <div class="feed" ref="feedEl">
       <div v-if="segments.length === 0" class="empty">
-        <strong>字幕会显示在这里</strong><span>开始课堂后，原文与译文会持续更新。</span>
+        <strong>{{ t('feed.emptyTitle') }}</strong><span>{{ t('feed.emptyText') }}</span>
       </div>
       <div
         v-for="seg in segments"
@@ -21,7 +21,7 @@
           <span>{{ segmentStatusText(seg, mainLang) }}</span>
           <time v-if="seg.timestamp_ms != null">{{ formatTs(seg.timestamp_ms) }}</time>
         </div>
-        <button class="star" :class="{ active: seg.is_starred }" :aria-label="seg.is_starred ? '取消重点标记' : '标记重点'" :aria-pressed="Boolean(seg.is_starred)" @click="emit('star', seg.id)">
+        <button class="star" :class="{ active: seg.is_starred }" :aria-label="seg.is_starred ? t('feed.unstar') : t('feed.star')" :aria-pressed="Boolean(seg.is_starred)" @click="emit('star', seg.id)">
           {{ seg.is_starred ? '★' : '☆' }}
         </button>
         <div class="source" :lang="seg.lang || mainLang">{{ seg.ko }}</div>
@@ -38,7 +38,7 @@
         </div>
       </div>
     </div>
-    <button v-if="!isAtBottom && segments.length" type="button" class="jump-latest" @click="jumpToLatest">回到最新 ↓</button>
+    <button v-if="!isAtBottom && segments.length" type="button" class="jump-latest" @click="jumpToLatest">{{ t('feed.jumpLatest') }}</button>
   </div>
 </template>
 
@@ -48,6 +48,7 @@ import SpeakerChip from './SpeakerChip.vue'
 import DirectionBadge from './DirectionBadge.vue'
 import { DEFAULT_PLAN, languageLabel, shortLanguageLabel } from '../utils/languages.js'
 import { segmentStatusText, translationLines } from '../utils/segments.js'
+import { t } from '../i18n/index.js'
 const props = defineProps({
   segments: { type: Array, default: () => [] },
   plan: { type: Object, default: () => DEFAULT_PLAN },
@@ -75,9 +76,9 @@ function visibleLines(seg) {
 
 function lineText(seg, line) {
   if (line.text) return line.text
-  if (line.state === 'pending') return seg.status === 'interim' && !isMulti(seg) ? '识别中…' : '…'
-  if (line.state === 'translating') return '翻译生成中…'
-  return '翻译暂不可用'
+  if (line.state === 'pending') return seg.status === 'interim' && !isMulti(seg) ? t('feed.recognizing') : '…'
+  if (line.state === 'translating') return t('feed.translating')
+  return t('feed.unavailable')
 }
 
 // 只在用户处于"贴近底部"时自动滚；滑上去看历史就不抢锚点

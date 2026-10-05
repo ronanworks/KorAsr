@@ -1,20 +1,20 @@
 <template>
   <div class="materials-panel">
     <div class="materials-heading">
-      <div><h2 v-if="!compact">课堂材料</h2><p>最多 10 件，每件不超过 20 MB。支持 PDF、PPTX、DOCX、TXT、MD。</p></div>
+      <div><h2 v-if="!compact">{{ t('materials.title') }}</h2><p>{{ t('materials.limits') }}</p></div>
       <label v-if="canEdit && sessionId && materials.length < 10" class="upload-button" :class="{ disabled: uploading }">
-        {{ uploading ? '上传中…' : '上传材料' }}
+        {{ uploading ? t('materials.uploading') : t('materials.upload') }}
         <input type="file" accept=".pdf,.pptx,.docx,.txt,.md" :disabled="uploading" @change="uploadFile" />
       </label>
     </div>
-    <p class="privacy-note">原文件保存在此服务器。翻译时，提取的少量相关文字会随当前字幕发送给 Moonshot/Kimi 翻译服务。</p>
-    <p v-if="canEdit && isRecording" class="privacy-note">录音中上传的新材料只影响后续字幕。</p>
-    <p v-if="uploading" class="upload-progress" role="status">{{ uploadPercent === null ? '正在上传并解析材料…' : `已上传 ${uploadPercent}% · 正在等待文字解析` }}</p>
+    <p class="privacy-note">{{ t('materials.privacy') }}</p>
+    <p v-if="canEdit && isRecording" class="privacy-note">{{ t('materials.duringRecording') }}</p>
+    <p v-if="uploading" class="upload-progress" role="status">{{ uploadPercent === null ? t('materials.parsing') : t('materials.progress', { percent: uploadPercent }) }}</p>
     <p v-if="error" class="material-error" role="alert">{{ error }}</p>
-    <p v-if="loading" class="empty-material" role="status">正在读取材料…</p>
+    <p v-if="loading" class="empty-material" role="status">{{ t('materials.reading') }}</p>
     <div v-else-if="!materials.length" class="empty-material">
-      <strong>还没有课堂材料</strong>
-      <span>可上传课程讲义或提纲，让后续翻译参考其中的术语和上下文。</span>
+      <strong>{{ t('materials.emptyTitle') }}</strong>
+      <span>{{ t('materials.emptyText') }}</span>
     </div>
     <ul v-else class="material-list">
       <li v-for="item in materials" :key="item.id" class="material-item">
@@ -22,12 +22,12 @@
         <div class="file-info">
           <strong :title="item.filename">{{ item.filename }}</strong>
           <span>{{ formatBytes(item.size_bytes) }} · {{ extractionLabel(item) }}</span>
-          <small v-if="item.extraction_status === 'needs_ocr'" class="ocr-hint">扫描版 PDF 无可提取文字。请先 OCR，或在术语表中手工补充术语。</small>
-          <small v-else-if="item.extraction_status === 'no_text'">该文件未提取到可读文字，可手工补充术语。</small>
+          <small v-if="item.extraction_status === 'needs_ocr'" class="ocr-hint">{{ t('materials.needsOcr') }}</small>
+          <small v-else-if="item.extraction_status === 'no_text'">{{ t('materials.noText') }}</small>
         </div>
         <div class="file-actions">
-          <a :href="`/api/sessions/${sessionId}/materials/${item.id}/download`" download :aria-label="`下载 ${item.filename}`">下载</a>
-          <button v-if="canEdit" type="button" :disabled="deletingId === item.id" :aria-label="`删除 ${item.filename}`" @click="deleteMaterial(item)">删除</button>
+          <a :href="`/api/sessions/${sessionId}/materials/${item.id}/download`" download :aria-label="t('materials.downloadLabel', { file: item.filename })">{{ t('common.download') }}</a>
+          <button v-if="canEdit" type="button" :disabled="deletingId === item.id" :aria-label="t('materials.deleteLabel', { file: item.filename })" @click="deleteMaterial(item)">{{ t('common.delete') }}</button>
         </div>
       </li>
     </ul>
@@ -37,6 +37,8 @@
 <script setup>
 import { ref, watch } from 'vue'
 import axios from 'axios'
+import { t } from '../i18n/index.js'
+import { serverMessage } from '../i18n/apiErrors.js'
 
 const props = defineProps({
   sessionId: { type: String, default: null },
@@ -67,19 +69,18 @@ async function loadMaterials() {
     materials.value = data.materials || []
     emit('changed', materials.value.length)
   } catch (e) {
-    if (request === loadSeq) error.value = responseError(e, '材料列表读取失败。')
+    if (request === loadSeq) error.value = responseError(e, t('materials.loadFailed'))
   } finally {
     if (request === loadSeq) loading.value = false
   }
 }
 
 function responseError(e, fallback) {
-  if (e.response?.status === 415) return '不支持此格式。旧版 .ppt 请先转换成 .pptx。'
-  if (e.response?.status === 413) return '文件超过 20 MB，或这节课的材料已达到 10 件。'
-  if (e.response?.status === 422) return '文件为空或文件名不符合要求，请检查后重试。'
-  if (e.response?.status === 503) return '服务器暂时无法解析此文档，请联系管理员检查文档组件。'
-  const detail = e.response?.data?.detail
-  return typeof detail === 'string' ? detail : fallback
+  if (e.response?.status === 415) return t('materials.unsupported')
+  if (e.response?.status === 413) return t('materials.tooLarge')
+  if (e.response?.status === 422) return t('materials.invalidFile')
+  if (e.response?.status === 503) return t('materials.parserUnavailable')
+  return serverMessage(e) || fallback
 }
 
 async function uploadFile(event) {
@@ -89,15 +90,15 @@ async function uploadFile(event) {
   if (!file || !props.sessionId || uploading.value) return
   const extension = file.name.split('.').at(-1)?.toLowerCase()
   if (!['pdf', 'pptx', 'docx', 'txt', 'md'].includes(extension)) {
-    error.value = '请选择 PDF、PPTX、DOCX、TXT 或 MD 文件。'
+    error.value = t('materials.chooseType')
     return
   }
   if (file.size > 20 * 1024 * 1024) {
-    error.value = '单个文件不能超过 20 MB。'
+    error.value = t('materials.fileTooLarge')
     return
   }
   if (materials.value.length >= 10) {
-    error.value = '每节课最多保存 10 件材料。'
+    error.value = t('materials.limitReached')
     return
   }
   const sessionId = props.sessionId
@@ -117,7 +118,7 @@ async function uploadFile(event) {
       emit('changed', materials.value.length)
     }
   } catch (e) {
-    if (sessionId === props.sessionId) error.value = responseError(e, '材料上传失败，请检查文件格式和服务器状态。')
+    if (sessionId === props.sessionId) error.value = responseError(e, t('materials.uploadFailed'))
   } finally {
     uploading.value = false
     uploadPercent.value = null
@@ -125,7 +126,7 @@ async function uploadFile(event) {
 }
 
 async function deleteMaterial(item) {
-  if (!confirm(`确定从服务器永久删除“${item.filename}”？后续翻译将不再参考这份材料。`)) return
+  if (!confirm(t('materials.confirmDelete', { file: item.filename }))) return
   const sessionId = props.sessionId
   deletingId.value = item.id
   error.value = ''
@@ -136,22 +137,24 @@ async function deleteMaterial(item) {
       emit('changed', materials.value.length)
     }
   } catch (e) {
-    if (sessionId === props.sessionId) error.value = responseError(e, '材料删除失败。')
+    if (sessionId === props.sessionId) error.value = responseError(e, t('materials.deleteFailed'))
   } finally { deletingId.value = null }
 }
 
 function formatBytes(size) {
-  if (size == null) return '大小未知'
-  return size < 1024 * 1024 ? `${Math.max(1, Math.round(size / 1024))} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`
+  if (size == null) return t('materials.sizeUnknown')
+  return size < 1024 * 1024
+    ? t('materials.kilobytes', { size: Math.max(1, Math.round(size / 1024)) })
+    : t('materials.megabytes', { size: (size / 1024 / 1024).toFixed(1) })
 }
 function fileType(item) { return (item.extension || item.filename.split('.').at(-1) || 'FILE').replace(/^\./, '').toUpperCase() }
 function extractionLabel(item) {
-  if (item.extraction_status === 'needs_ocr') return '需要文字识别'
-  if (item.extraction_status === 'no_text') return '未提取到文字'
+  if (item.extraction_status === 'needs_ocr') return t('materials.stateNeedsOcr')
+  if (item.extraction_status === 'no_text') return t('materials.stateNoText')
   if (item.extraction_status === 'ready' || item.extraction_status === 'extracted') {
-    return item.extracted_char_count ? `已提取 ${item.extracted_char_count} 字` : '已解析'
+    return item.extracted_char_count ? t('materials.stateExtracted', { count: item.extracted_char_count }) : t('materials.stateParsed')
   }
-  return '解析状态待确认'
+  return t('materials.stateUnknown')
 }
 </script>
 

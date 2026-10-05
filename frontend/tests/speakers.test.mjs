@@ -4,6 +4,10 @@ import test from 'node:test'
 import {
   mergeSpeakerList, normalizeSpeakerName, speakerColor, speakerLabel, speakersFromList, SPEAKER_PALETTE,
 } from '../src/utils/speakers.js'
+import { setLocale } from '../src/i18n/index.js'
+
+// These assertions read the Chinese interface (navigator.languages is en-US in Node).
+setLocale('zh')
 
 test('speakerLabel uses the custom name, otherwise 说话人 {index+1}', () => {
   const speakers = { 0: { index: 0, name: null }, 1: { index: 1, name: '教授' }, 2: { index: 2, name: '   ' } }

@@ -1,13 +1,13 @@
 <template>
   <div class="polish-feed">
     <div v-if="showHeader" class="header">
-      <span class="title">精修译文</span>
+      <span class="title">{{ t('polish.title') }}</span>
       <span class="language-pair" :title="planDirections(plan)">{{ planLabel(plan) }}</span>
     </div>
     <OutlinePanel :outline="outline" :lang="plan.displayLanguages[0]" />
     <div class="chunks" ref="chunksEl">
       <div v-if="chunks.length === 0" class="empty">
-        课堂开始后，每约 60 秒生成一段精修译文和本分钟要点。
+        {{ t('polish.empty') }}
       </div>
       <PolishCard
         v-for="c in chunks"
@@ -26,6 +26,7 @@ import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import PolishCard from './PolishCard.vue'
 import OutlinePanel from './OutlinePanel.vue'
 import { DEFAULT_PLAN, planDirections, planLabel } from '../utils/languages.js'
+import { t } from '../i18n/index.js'
 const props = defineProps({
   chunks: { type: Array, default: () => [] },
   plan: { type: Object, default: () => DEFAULT_PLAN },

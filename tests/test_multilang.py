@@ -280,7 +280,8 @@ class PlanApiTests(_ApiCase):
 
 
 class MultilingualExportTests(_ApiCase):
-    def test_each_display_language_gets_its_own_line_and_column(self):
+    def _mixed_class(self):
+        """A Korean class with one English sentence (two targets), one Chinese one and a polished minute."""
         created = self.create(name="Mixed", languages=["ko", "zh"], extra_languages=["en"], display_languages=["zh", "ko"])
         sid = created["id"]
         row = self.db.get(SessionModel, sid)
@@ -299,6 +300,62 @@ class MultilingualExportTests(_ApiCase):
                           ], ensure_ascii=False)),
         ])
         self.db.commit()
+        return sid
+
+    def _export(self, sid, fmt, **query):
+        return export_session(sid, fmt, self.db, self.user, **query).body.decode("utf-8")
+
+    def test_ui_lang_zh_and_the_default_are_todays_export(self):
+        sid = self._mixed_class()
+        for fmt in ("txt", "md"):
+            with self.subTest(format=fmt):
+                today = self._export(sid, fmt)
+                self.assertEqual(self._export(sid, fmt, ui_lang="zh"), today)
+                self.assertEqual(self._export(sid, fmt, ui_lang="fr"), today)   # unknown → default
+                self.assertEqual(self._export(sid, fmt, ui_lang="zh-CN"), today)
+
+    def test_ui_lang_sets_headers_and_language_names_but_never_the_content(self):
+        sid = self._mixed_class()
+        txt = self._export(sid, "txt", ui_lang="en")
+        self.assertIn("# Korean → Chinese (class languages: Korean, Chinese; occasional: English; display: Chinese, Korean)", txt)
+        self.assertIn("[00:02] Speaker 2: [English→Chinese/Korean] Next.\n    Chinese: 下一个。\n    Korean: 다음.", txt)
+        self.assertIn("[00:03] [Chinese→Korean] 讲稿在下面 | 강의안은 아래", txt)
+        self.assertIn("Speaker 2: Next.\n  → Chinese: 下一个。\n  → Korean: 다음.", txt)
+        self.assertIn("- 要点", txt)                                       # key points are data
+
+        md = self._export(sid, "md", ui_lang="en")
+        self.assertIn("| Time | Original | Chinese | Korean |", md)
+        self.assertIn("| 00:02 | **Speaker 2** [English→Chinese/Korean] Next. | 下一个。 | 다음. |", md)
+        self.assertIn("- **Speaker 2**: 下一个。\n  <br>Korean: 다음.", md)
+        self.assertIn("**Duration**: 0 min", md)
+        self.assertNotIn("原文", md)
+        self.assertNotIn("说话人", md)
+
+        ko = self._export(sid, "md", ui_lang="ko")
+        self.assertIn("| 시간 | 원문 | 중국어 | 한국어 |", ko)
+        self.assertIn("**화자 2** [영어→중국어/한국어] Next.", ko)
+        self.assertIn("**번역 방향**: 한국어 → 중국어 (수업 언어: 한국어, 중국어; 가끔: 영어; 표시: 중국어, 한국어)", ko)
+        self.assertIn("## 원문 자막", ko)
+
+        ru = self._export(sid, "txt", ui_lang="ru")
+        self.assertIn("# Корейский → китайский (языки занятия: корейский, китайский; иногда: английский; "
+                      "отображение: китайский, корейский)", ru)
+        self.assertIn("[00:02] Спикер 2: [английский→китайский/корейский] Next.\n    Китайский: 下一个。\n    Корейский: 다음.", ru)
+        self.assertIn("=== Чистовой перевод ===", ru)
+        ru_md = self._export(sid, "md", ui_lang="ru")
+        self.assertIn("| Время | Оригинал | Китайский | Корейский |", ru_md)
+
+    def test_named_speakers_keep_their_names_in_every_language(self):
+        sid = self._mixed_class()
+        row = self.db.get(SessionModel, sid)
+        row.speaker_names = json.dumps({"1": "教授"}, ensure_ascii=False)
+        self.db.commit()
+        self.assertIn("说话人2（教授）: [英语→中文/韩语] Next.", self._export(sid, "txt"))
+        self.assertIn("Speaker 2 (教授): [English→Chinese/Korean] Next.", self._export(sid, "txt", ui_lang="en"))
+        self.assertIn("**화자 2 (教授)**", self._export(sid, "md", ui_lang="ko"))
+
+    def test_each_display_language_gets_its_own_line_and_column(self):
+        sid = self._mixed_class()
 
         txt = export_session(sid, "txt", self.db, self.user).body.decode("utf-8")
         self.assertIn("# 韩语 → 中文（课堂语言：韩语、中文；偶尔：英语；显示：中文、韩语）", txt)

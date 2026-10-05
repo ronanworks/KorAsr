@@ -8,13 +8,15 @@
       @change="onChange"
     />
     <span class="track" aria-hidden="true"><span class="thumb"></span></span>
-    <span class="label">小声增强</span>
+    <span class="label">{{ t('vadGain.label') }}</span>
   </label>
 </template>
 
 <script setup>
 // 小声增强 switch (contract §2a vad_gain). Checked/change rather than v-model, so the state
 // always comes from the store and the event carries a plain boolean.
+import { t } from '../i18n/index.js'
+
 defineProps({
   modelValue: { type: Boolean, default: false },
   describedby: { type: String, default: null },   // id of the visible explanation

@@ -1,6 +1,8 @@
 // Per-minute polish windows and the running class outline (contract §2–§3).
 // WebSocket `polish` messages and REST `polished_chunks` rows are normalised
 // to one client shape so the live panel and the history page share rendering.
+import { locale, t } from '../i18n/index.js'
+import { NO_CONTENT } from './serverText.js'
 import { isSpeakerIndex } from './speakers.js'
 
 function msOrNull(value) {
@@ -91,19 +93,20 @@ export function upsertPolishChunk(chunks, chunk) {
 }
 
 // "- 要点一\n- 要点二" → ['要点一', '要点二'] (bullets, numbering and headings stripped).
+// The full-width marks in these patterns (． 、 ） （ 。) are written as escapes.
 export function bulletLines(text) {
   if (typeof text !== 'string') return []
   return text
     .split(/\r?\n/)
     // Markers need trailing space where content could start the same way (3.5%, -5%).
-    .map(line => line.replace(/^\s*(?:#{1,6}\s+|[-*+]\s+|[•·・]\s*|\d{1,2}(?:[.．](?!\d)|[、)）])\s*)/, '').trim())
+    .map(line => line.replace(/^\s*(?:#{1,6}\s+|[-*+]\s+|[•·・]\s*|\d{1,2}(?:[.\uff0e](?!\d)|[\u3001)\uff09])\s*)/, '').trim())
     .filter(Boolean)
 }
 
-// The summariser writes （无实质内容） for windows without substance.
+// The summariser writes （无实质内容） for windows without substance (serverText.js NO_CONTENT).
 export function isNoContentSummary(summary) {
   const lines = bulletLines(summary)
-  return lines.length === 1 && lines[0].replace(/[()（）\s。.]/g, '') === '无实质内容'
+  return lines.length === 1 && lines[0].replace(/[()\uff08\uff09\s\u3002.]/g, '') === NO_CONTENT
 }
 
 export function summaryPoints(summary) {
@@ -116,11 +119,11 @@ export function formatAudioTime(ms) {
 }
 
 // `03:00–04:01` for new windows; `#N` for chunks saved before start/end times existed.
-export function polishWindowLabel(chunk) {
+export function polishWindowLabel(chunk, ui = locale.value) {
   if (chunk.startMs != null && chunk.endMs != null) {
     return `${formatAudioTime(chunk.startMs)}–${formatAudioTime(chunk.endMs)}`
   }
-  if (chunk.startMs != null) return `${formatAudioTime(chunk.startMs)} 起`
+  if (chunk.startMs != null) return t('polish.from', { time: formatAudioTime(chunk.startMs) }, ui)
   return chunk.chunkIndex != null ? `#${chunk.chunkIndex + 1}` : '#'
 }
 

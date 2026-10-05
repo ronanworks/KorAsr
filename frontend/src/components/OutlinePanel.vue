@@ -1,7 +1,7 @@
 <template>
   <details v-if="outline" class="outline" :class="{ limited: limitHeight }" :open="defaultOpen">
     <summary>
-      <span class="outline-title">课堂脉络</span>
+      <span class="outline-title">{{ t('outline.title') }}</span>
       <span v-if="metaText" class="outline-meta">{{ metaText }}</span>
     </summary>
     <ul v-if="lines.length" class="outline-list" :lang="lang">
@@ -13,6 +13,7 @@
 <script setup>
 import { computed } from 'vue'
 import { bulletLines, formatAudioTime } from '../utils/polish.js'
+import { formatDateTime, t } from '../i18n/index.js'
 
 // outline: normalizeOutline() output — { text, throughMs, updatedAt } or null (hidden).
 const props = defineProps({
@@ -25,17 +26,15 @@ const props = defineProps({
 const lines = computed(() => bulletLines(props.outline?.text))
 const metaText = computed(() => {
   const parts = []
-  if (props.outline?.throughMs != null) parts.push(`截至 ${formatAudioTime(props.outline.throughMs)}`)
+  if (props.outline?.throughMs != null) parts.push(t('outline.through', { time: formatAudioTime(props.outline.throughMs) }))
   const updated = clockTime(props.outline?.updatedAt)
-  if (updated) parts.push(`${updated} 更新`)
+  if (updated) parts.push(t('outline.updated', { time: updated }))
   return parts.join(' · ')
 })
 
 function clockTime(iso) {
   if (!iso) return ''
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return ''
-  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+  return formatDateTime(iso, { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 </script>
 

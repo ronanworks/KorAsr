@@ -1,13 +1,13 @@
 <template>
   <div class="notes-pad">
     <div v-if="showHeader" class="header">
-      <span>课堂笔记</span>
-      <span class="saved-hint">输入后自动保存</span>
+      <span>{{ t('notes.title') }}</span>
+      <span class="saved-hint">{{ t('notes.autosave') }}</span>
     </div>
     <textarea
       class="editor"
-      placeholder="记录重点、问题或待查证的内容…"
-      aria-label="课堂笔记"
+      :placeholder="t('notes.placeholder')"
+      :aria-label="t('notes.title')"
       :value="modelValue"
       @input="onInput"
     ></textarea>
@@ -15,6 +15,8 @@
 </template>
 
 <script setup>
+import { t } from '../i18n/index.js'
+
 defineProps({
   modelValue: String,
   showHeader: { type: Boolean, default: true },

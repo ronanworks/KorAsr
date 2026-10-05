@@ -5,7 +5,7 @@
     class="speaker-editor"
     :style="{ '--speaker-color': color }"
     role="group"
-    :aria-label="`修改“${label}”的名称`"
+    :aria-label="t('speaker.editGroup', { name: label })"
     @focusout="onFocusOut"
   >
     <span class="dot" aria-hidden="true"></span>
@@ -16,15 +16,15 @@
       type="text"
       :maxlength="SPEAKER_NAME_MAX"
       :placeholder="defaultLabel"
-      :aria-label="`${label}的新名称，留空恢复默认`"
+      :aria-label="t('speaker.newName', { name: label })"
       enterkeyhint="done"
       autocomplete="off"
       spellcheck="false"
       @keydown.enter="onEnter"
       @keydown.esc="onEscape"
     />
-    <button type="button" class="editor-action save" @click="finish(true)">保存</button>
-    <button type="button" class="editor-action" @click="finish(false)">取消</button>
+    <button type="button" class="editor-action save" @click="finish(true)">{{ t('common.save') }}</button>
+    <button type="button" class="editor-action" @click="finish(false)">{{ t('common.cancel') }}</button>
   </span>
   <button
     v-else-if="editable"
@@ -32,8 +32,8 @@
     type="button"
     class="speaker-chip"
     :style="{ '--speaker-color': color }"
-    :title="`${label} · 点击改名`"
-    :aria-label="`${label}，点击修改说话人名称`"
+    :title="t('speaker.chipTitle', { name: label })"
+    :aria-label="t('speaker.chipLabel', { name: label })"
     @click="startEdit"
   >
     <span class="pill"><span class="dot" aria-hidden="true"></span><span class="name">{{ label }}</span></span>
@@ -46,6 +46,7 @@
 <script setup>
 import { computed, nextTick, ref } from 'vue'
 import { normalizeSpeakerName, speakerColor, speakerLabel, SPEAKER_NAME_MAX } from '../utils/speakers.js'
+import { t } from '../i18n/index.js'
 
 const props = defineProps({
   index: { type: Number, required: true },

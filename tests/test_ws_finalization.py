@@ -872,6 +872,22 @@ class PauseResumeTests(_HandlerTestCase):
         self.assertEqual(texts_saved, ["이야기 정말 하고 싶었어요.", "아 그랬어요?"])
 
 
+class TopicHintTests(_HandlerTestCase):
+    """The class name reaches the live translation prompt only when the user gave one."""
+
+    def test_the_default_name_of_every_interface_language_is_not_a_topic(self):
+        hint = self.handler._topic_hint
+        for name in ("课堂 · 10月5日", "수업 · 10월 5일", "Class · October 5", "Занятие · 5 октября", "课堂·9月28日"):
+            with self.subTest(name=name):
+                self.assertEqual(hint(types.SimpleNamespace(name=name), None), "")
+
+    def test_a_name_the_user_typed_is_still_the_topic(self):
+        hint = self.handler._topic_hint
+        for name in ("Class · Microeconomics", "经济学 · 10月5日", "수업 · 경제학", "Занятие · экономика 2"):
+            with self.subTest(name=name):
+                self.assertEqual(hint(types.SimpleNamespace(name=name), None), f"课程名称：{name}")
+
+
 class ObservabilityTests(_HandlerTestCase):
     """client_info diagnostics and per-sentence latency go to the log only."""
 

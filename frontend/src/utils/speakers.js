@@ -1,4 +1,5 @@
 // Pure helpers for diarised speakers. Contract: docs/dev/2026-09-28-contract-bilingual-speaker-polish.md §2–§4.
+import { locale, t } from '../i18n/index.js'
 
 export const SPEAKER_PALETTE = ['#2f6fde', '#d9480f', '#2b8a3e', '#9c36b5', '#c2255c', '#0b7285', '#e67700', '#5c7cfa']
 export const SPEAKER_NAME_MAX = 24
@@ -27,10 +28,11 @@ export function normalizeSpeakerName(name) {
   return cleaned || null
 }
 
-export function speakerLabel(index, speakers) {
+// The custom name (data, never translated), otherwise 说话人 N / Speaker N in the interface language.
+export function speakerLabel(index, speakers, ui = locale.value) {
   const name = normalizeSpeakerName(speakerEntry(index, speakers)?.name)
   if (name) return name
-  return isSpeakerIndex(index) ? `说话人 ${index + 1}` : '说话人'
+  return isSpeakerIndex(index) ? t('speaker.numbered', { number: index + 1 }, ui) : t('speaker.unknown', {}, ui)
 }
 
 export function speakerColor(index) {

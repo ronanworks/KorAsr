@@ -4,6 +4,10 @@ import axios from 'axios'
 import { createPinia, setActivePinia } from 'pinia'
 
 import { useSessionStore } from '../src/stores/session.js'
+import { setLocale } from '../src/i18n/index.js'
+
+// These assertions read the Chinese interface (navigator.languages is en-US in Node).
+setLocale('zh')
 
 const originalAxios = { post: axios.post, get: axios.get, put: axios.put, patch: axios.patch }
 

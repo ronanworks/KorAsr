@@ -2,24 +2,24 @@
   <article class="chunk" :class="{ fallback: isFallback }">
     <header class="chunk-head">
       <span class="chunk-time">{{ windowLabel }}</span>
-      <span v-if="isLegacy && chunk.startSeq != null" class="seg-range">segments {{ chunk.startSeq }}–{{ chunk.endSeq }}</span>
-      <span v-if="isFallback" class="state-tag" title="这一分钟未能精修，显示实时识别和译文">沿用实时译文</span>
+      <span v-if="isLegacy && chunk.startSeq != null" class="seg-range">{{ t('polish.legacyRange', { from: chunk.startSeq, to: chunk.endSeq }) }}</span>
+      <span v-if="isFallback" class="state-tag" :title="t('polish.fallbackTitle')">{{ t('polish.fallback') }}</span>
       <button
         v-if="canToggleSource"
         type="button"
         class="source-toggle"
         :aria-expanded="showSource ? 'true' : 'false'"
         @click="showSource = !showSource"
-      >{{ showSource ? '收起原文' : '原文' }}</button>
+      >{{ showSource ? t('polish.hideSource') : t('polish.showSource') }}</button>
     </header>
 
-    <section v-if="points.length" class="points" :aria-label="`${windowLabel} 本分钟要点`">
-      <h4>本分钟要点</h4>
+    <section v-if="points.length" class="points" :aria-label="t('polish.pointsLabel', { window: windowLabel })">
+      <h4>{{ t('polish.points') }}</h4>
       <ul :lang="readingLang">
         <li v-for="(point, i) in points" :key="i">{{ point }}</li>
       </ul>
     </section>
-    <p v-else-if="noContent" class="points-empty">本分钟无实质内容</p>
+    <p v-else-if="noContent" class="points-empty">{{ t('polish.noContent') }}</p>
 
     <ol v-if="chunk.runs.length" class="runs">
       <li v-for="(run, i) in chunk.runs" :key="i" class="run">
@@ -55,7 +55,7 @@
     <template v-else>
       <div class="chunk-zh" :lang="readingLang">{{ chunk.zh }}</div>
       <details v-if="chunk.ko" class="chunk-ko">
-        <summary>查看{{ languageLabel(mainLang) }}原文</summary>
+        <summary>{{ t('polish.viewSource', { lang: inlineLanguageLabel(mainLang) }) }}</summary>
         <div :lang="mainLang">{{ chunk.ko }}</div>
       </details>
     </template>
@@ -66,7 +66,8 @@
 import { computed, ref } from 'vue'
 import SpeakerChip from './SpeakerChip.vue'
 import DirectionBadge from './DirectionBadge.vue'
-import { DEFAULT_PLAN, itemBadge, languageLabel, shortLanguageLabel } from '../utils/languages.js'
+import { DEFAULT_PLAN, inlineLanguageLabel, itemBadge, languageLabel, shortLanguageLabel } from '../utils/languages.js'
+import { t } from '../i18n/index.js'
 import { isNoContentSummary, polishWindowLabel, runTranslationLines, summaryPoints } from '../utils/polish.js'
 
 // chunk: normalizePolishChunk() output (live WS or history REST); plan: the class's language plan.

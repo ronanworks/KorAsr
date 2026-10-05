@@ -8,6 +8,10 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import { RECONNECT_DELAYS_MS, VAD_GAIN_KEY_PREFIX, useSessionStore } from '../src/stores/session.js'
 import { byClass, byTag, find, findAll, mount, textOf, trigger } from './helpers/sfc.mjs'
+import { setLocale } from '../src/i18n/index.js'
+
+// These assertions read the Chinese interface (navigator.languages is en-US in Node).
+setLocale('zh')
 
 const originalAxios = { post: axios.post, get: axios.get, put: axios.put, patch: axios.patch }
 

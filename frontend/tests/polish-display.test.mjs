@@ -12,6 +12,10 @@ import {
 import {
   mergeSegmentUpdate, segmentFromRecord, segmentStatusText, translationLines, withTranslationFields,
 } from '../src/utils/segments.js'
+import { setLocale } from '../src/i18n/index.js'
+
+// These assertions read the Chinese interface (navigator.languages is en-US in Node).
+setLocale('zh')
 
 const RUN = {
   speaker: 1, lang: 'zh', target_lang: 'ko', start_ms: 180200, end_ms: 195000,

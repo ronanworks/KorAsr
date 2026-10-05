@@ -7,6 +7,7 @@ import { normalizeOutline, normalizePolishChunk, upsertPolishChunk } from '../ut
 import { mergeSegmentUpdate, segmentFromRecord, withTranslationFields } from '../utils/segments.js'
 import { DEFAULT_PLAN, normalizePlan, planFromLegacy, planLegacyFields, planRequestFields, sessionPlan } from '../utils/languages.js'
 import { readStored, writeStored } from '../utils/storage.js'
+import { t } from '../i18n/index.js'
 
 // Automatic reconnects after an unexpected close (Wi-Fi/Tailscale hiccup, laptop
 // sleep). The server pauses a class whose socket drops, so each attempt resumes it.
@@ -17,7 +18,6 @@ export const RECONNECT_DELAYS_MS = [2000, 5000, 10000]
 export const PENDING_AUDIO_MAX_SAMPLES = 16000 * 10
 // A WebSocket is in use or about to be; leaving the classroom would strand it.
 const LIVE_STATUSES = ['connecting', 'capturing', 'pausing', 'reconnecting', 'resuming']
-const CONNECT_FAILED = '无法连接录音服务，请检查网络后重试'
 // 小声增强 (contract §2a vad_gain), remembered per class in this browser: '1' on, '0' off.
 export const VAD_GAIN_KEY_PREFIX = 'korasr.vadGain.'
 
@@ -180,7 +180,7 @@ export const useSessionStore = defineStore('session', () => {
       axios.get(`/api/sessions/${sessionId}`),
       axios.get(`/api/sessions/${sessionId}/glossary`),
     ])
-    if (data.session?.recording_state !== 'created') throw new Error('这节课已经开始录音，无法返回准备阶段')
+    if (data.session?.recording_state !== 'created') throw new Error(t('session.alreadyStarted'))
     cancelReconnect()
     clearTimeout(notesSaveTimeout)
     currentSessionId.value = sessionId
@@ -207,14 +207,14 @@ export const useSessionStore = defineStore('session', () => {
   // Continue a paused class (history page, or after a reload): show everything saved
   // before the pause — sentences, polish, speakers, outline — then resume from there.
   async function loadPausedSession(sessionId) {
-    if (isLive.value) throw new Error('请先暂停或结束当前课堂')
+    if (isLive.value) throw new Error(t('session.finishCurrent'))
     const [{ data }, glossary, recording] = await Promise.all([
       axios.get(`/api/sessions/${sessionId}`),
       axios.get(`/api/sessions/${sessionId}/glossary`),
       axios.get(`/api/sessions/${sessionId}/recording`).catch(() => ({ data: null })),
     ])
-    if (data.session?.recording_state !== 'paused') throw new Error('这节课不在暂停状态，无法继续')
-    if (isLive.value) throw new Error('请先暂停或结束当前课堂')
+    if (data.session?.recording_state !== 'paused') throw new Error(t('session.notPaused'))
+    if (isLive.value) throw new Error(t('session.finishCurrent'))
     cancelReconnect()
     clearTimeout(notesSaveTimeout)
     clearTimeout(finalizeNoticeTimeout)
@@ -251,7 +251,7 @@ export const useSessionStore = defineStore('session', () => {
   // Bidirectional is sent only when given, so older callers keep their exact PATCH body;
   // options.plan sends the whole language plan instead.
   async function updatePreparedSession(name, terms, source, target, options = {}) {
-    if (!currentSessionId.value || recordingStatus.value !== 'prepared') throw new Error('只能修改尚未录音的课堂')
+    if (!currentSessionId.value || recordingStatus.value !== 'prepared') throw new Error(t('session.onlyPrepared'))
     const requested = planOption(options)
     const mode = bidirectionalOption(options)
     const changes = requested
@@ -360,7 +360,7 @@ export const useSessionStore = defineStore('session', () => {
     return new Promise((resolve, reject) => {
       socket.onopen = () => {
         if (conn.cancelled || connection !== conn || currentSessionId.value !== sessionId) {
-          reject(new Error('课堂已切换，录音连接已取消'))
+          reject(new Error(t('session.switched')))
           socket.close()   // the server pauses a socket that closes without a stop
           return
         }
@@ -387,7 +387,7 @@ export const useSessionStore = defineStore('session', () => {
       socket.onmessage = event => handleMessage(sessionId, event)
       socket.onclose = event => { handleClose(conn, event, reject, fallbackStatus) }
       // A close event always follows an error; it decides what happens next.
-      socket.onerror = () => { if (!conn.opened) reject(new Error(CONNECT_FAILED)) }
+      socket.onerror = () => { if (!conn.opened) reject(new Error(t('session.connectFailed'))) }
     })
   }
 
@@ -395,7 +395,7 @@ export const useSessionStore = defineStore('session', () => {
     const { sessionId } = conn
     const isCurrent = connection === conn && !conn.cancelled && currentSessionId.value === sessionId
     if (!conn.opened) {
-      reject(new Error(CONNECT_FAILED))
+      reject(new Error(t('session.connectFailed')))
       if (isCurrent) {
         recordingStatus.value = fallbackStatus
         connection = null
@@ -500,8 +500,8 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   async function startRecording(sessionId = currentSessionId.value) {
-    if (!sessionId || sessionId !== currentSessionId.value) throw new Error('请先保存课堂设置')
-    if (isLive.value) throw new Error('录音连接已在进行')
+    if (!sessionId || sessionId !== currentSessionId.value) throw new Error(t('session.saveFirst'))
+    if (isLive.value) throw new Error(t('session.alreadyRecording'))
     recordingStatus.value = 'connecting'
     recordingInfo.value = null
     isFinalizing.value = false
@@ -516,7 +516,7 @@ export const useSessionStore = defineStore('session', () => {
   async function resumeRecording() {
     const sessionId = currentSessionId.value
     if (!sessionId || !['paused', 'reconnecting'].includes(recordingStatus.value)) {
-      throw new Error('只能继续已暂停的课堂')
+      throw new Error(t('session.onlyResumePaused'))
     }
     cancelReconnect()
     recordingStatus.value = 'resuming'
@@ -589,7 +589,7 @@ export const useSessionStore = defineStore('session', () => {
   async function endPausedSession() {
     const sessionId = currentSessionId.value
     if (!sessionId || !['paused', 'reconnecting'].includes(recordingStatus.value)) {
-      throw new Error('只能结束已暂停的课堂')
+      throw new Error(t('session.onlyEndPaused'))
     }
     cancelReconnect()
     const reason = pauseReason.value
@@ -607,7 +607,7 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   async function updateGlossary(terms) {
-    if (!currentSessionId.value) throw new Error('请先开始录音')
+    if (!currentSessionId.value) throw new Error(t('session.startFirst'))
     const res = await axios.put(`/api/sessions/${currentSessionId.value}/glossary`, { terms })
     glossaryTerms.value = res.data.terms
   }
@@ -617,10 +617,10 @@ export const useSessionStore = defineStore('session', () => {
   // The live map updates optimistically and is replaced by the server list;
   // on failure the previous name comes back and the error is rethrown.
   async function renameSpeaker(index, name, sessionId = currentSessionId.value) {
-    if (!sessionId) throw new Error('请先选择课堂')
-    if (!isSpeakerIndex(index)) throw new Error('说话人编号无效')
+    if (!sessionId) throw new Error(t('session.chooseClass'))
+    if (!isSpeakerIndex(index)) throw new Error(t('speaker.invalidIndex'))
     const cleaned = normalizeSpeakerName(name)
-    if (cleaned && [...cleaned].length > SPEAKER_NAME_MAX) throw new Error(`说话人名称最多 ${SPEAKER_NAME_MAX} 个字`)
+    if (cleaned && [...cleaned].length > SPEAKER_NAME_MAX) throw new Error(t('speaker.tooLong', { count: SPEAKER_NAME_MAX }))
     const isLiveSession = () => sessionId === currentSessionId.value
     const hadEntry = Object.prototype.hasOwnProperty.call(speakers.value, index)
     const previous = speakers.value[index]

@@ -1,6 +1,8 @@
 // Live segment updates (contract §2). A segment moves interim → translating → done/error;
 // a stale lower-priority message (late interim after translating) is discarded.
-import { languageLabel } from './languages.js'
+import { locale, t } from '../i18n/index.js'
+import { inlineLanguageLabel, languageList } from './languages.js'
+import { ZH_RECOGNIZING, ZH_TRANSLATING, ZH_UNAVAILABLE } from './serverText.js'
 
 export const STATUS_PRIORITY = { interim: 0, translating: 1, done: 2, error: 2 }
 
@@ -9,7 +11,7 @@ export const STATUS_PRIORITY = { interim: 0, translating: 1, done: 2, error: 2 }
 export const STICKY_SEGMENT_FIELDS = ['speaker', 'lang', 'target_lang', 'targets', 'start_ms', 'end_ms']
 
 // Placeholders the server puts in the legacy `zh` field; never a translation.
-const ZH_PLACEHOLDERS = new Set(['翻译中...', '识别中...', '翻译暂不可用'])
+const ZH_PLACEHOLDERS = new Set([ZH_TRANSLATING, ZH_RECOGNIZING, ZH_UNAVAILABLE])
 
 function stateFromStatus(status, text) {
   if (status === 'translating') return 'translating'
@@ -67,7 +69,7 @@ export function segmentFromRecord(row) {
     return {
       ...base,
       status: translated ? 'done' : 'error',
-      zh: translated ? row.zh_text : '翻译暂不可用',
+      zh: translated ? row.zh_text : ZH_UNAVAILABLE,
     }
   }
   const targets = Array.isArray(row.targets) ? row.targets : Object.keys(saved)
@@ -78,7 +80,7 @@ export function segmentFromRecord(row) {
     ...base,
     // Nothing to translate (spoken in the only display language) is a finished sentence.
     status: !targets.length || anyText ? 'done' : 'error',
-    zh: primary ? (translations[primary] || '翻译暂不可用') : '',
+    zh: primary ? (translations[primary] || ZH_UNAVAILABLE) : '',
     target_lang: base.target_lang ?? primary,
     targets,
     translations,
@@ -121,20 +123,21 @@ export function translationLines(seg) {
   return [{ lang: seg?.target_lang ?? null, text, state: stateFromStatus(seg?.status, text) }]
 }
 
-// Status line of a sentence card, e.g. "英语已确定 · 中文、韩语生成中".
-export function segmentStatusText(seg, fallbackLang = null) {
-  if (seg?.status === 'interim') return '临时识别 · 可能修改'
-  const spoken = languageLabel(seg?.lang || fallbackLang)
+// Status line of a sentence card, e.g. "英语已确定 · 中文、韩语生成中" (interface language `ui`).
+export function segmentStatusText(seg, fallbackLang = null, ui = locale.value) {
+  if (seg?.status === 'interim') return t('segment.interim', {}, ui)
+  const spoken = inlineLanguageLabel(seg?.lang || fallbackLang, ui)
   const lines = translationLines(seg)
-  const names = state => lines.filter(line => line.state === state).map(line => languageLabel(line.lang)).join('、')
+  const names = state => languageList(lines.filter(line => line.state === state).map(line => line.lang), ui)
+  const named = lines.some(line => line.lang)
   if (seg?.status === 'translating') {
-    const generating = lines.some(line => line.lang) ? names('translating') : ''
-    return `${spoken}已确定 · ${generating || '译文'}生成中`
+    const targets = named ? names('translating') : ''
+    return targets ? t('segment.translating', { spoken, targets }, ui) : t('segment.translatingAny', { spoken }, ui)
   }
   if (seg?.status === 'error') {
-    const failed = lines.some(line => line.lang) ? names('error') : ''
-    return `${spoken}已确定 · ${failed || ''}翻译失败`
+    const targets = named ? names('error') : ''
+    return targets ? t('segment.failed', { spoken, targets }, ui) : t('segment.failedAny', { spoken }, ui)
   }
-  const failed = lines.some(line => line.lang) ? names('error') : ''
-  return failed ? `已确定 · ${failed}翻译失败` : '已确定'
+  const failed = named ? names('error') : ''
+  return failed ? t('segment.doneWithFailures', { targets: failed }, ui) : t('segment.done', {}, ui)
 }

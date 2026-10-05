@@ -34,6 +34,7 @@ All LLM calls in tests are mocked. Never run a replay with `--llm` (paid API) wi
 Browser mic (AudioWorklet, 4096-sample blocks) ──WS /ws/{session_id}──▶ backend/ws/handler.py
   ├─ raw PCM appended to RAW_AUDIO_DIR/<session>.pcm (archive + polish source)
   ├─ Transcriber (backend/asr/transcriber.py): Silero VAD cuts ≤6 s, audio-sample clock for timestamps
+  │    (小声增强, backend/asr/vad_gain.py: optional gain on Silero's copy only; off unless the client switches it)
   ├─ per final sentence: language ID among the class's languages (backend/asr/langid.py; frequent
   │    languages as before, occasional ones only on clear evidence)
   │    → Whisper → hallucination filters → speaker voiceprint + online clustering (backend/speaker/)
@@ -47,6 +48,7 @@ Browser mic (AudioWorklet, 4096-sample blocks) ──WS /ws/{session_id}──�
 - One module-level GPU semaphore serializes all Whisper work across sessions; interim previews skip when it is busy.
 - A polish window always advances even if ASR/LLM fail (falls back to live translations).
 - Frontend: Vue 3 + Pinia (`frontend/src/stores/session.js` handles WS messages); interface contracts in `docs/dev/2026-09-28-contract-bilingual-speaker-polish.md` and `docs/dev/2026-10-05-contract-multilang.md`.
+- Interface languages zh/ko/en/ru (`frontend/src/i18n/`): every visible string lives in `locales/{zh,ko,en,ru}.js` with identical keys; `frontend/tests/i18n.test.mjs` fails on missing keys and on any Chinese text in `frontend/src` outside the locale files and comments. Transcripts, translations, key points and speaker names are data, never translated. Exports take `?ui_lang=`.
 
 ## Important Notes
 

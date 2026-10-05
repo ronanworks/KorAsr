@@ -32,34 +32,34 @@
       <div v-if="micError" class="mic-error" role="alert">{{ micError }}</div>
       <div v-if="speakerError" class="mic-error" role="alert">{{ speakerError }}</div>
       <details v-if="micProcessingStatus" class="mic-diagnostics">
-        <summary>麦克风状态 · {{ micProcessingStatus.device }}</summary>
+        <summary>{{ t('mic.summary', { device: micProcessingStatus.device || t('mic.defaultDevice') }) }}</summary>
         <div>
-          <span>浏览器降噪：{{ micProcessingStatus.noiseSuppression }}</span>
-          <span>回声消除：{{ micProcessingStatus.echoCancellation }}</span>
-          <span>自动增益：{{ micProcessingStatus.autoGainControl }}</span>
-          <span v-if="micProcessingStatus.sampleRate">设备采样率：{{ micProcessingStatus.sampleRate }} Hz</span>
+          <span>{{ t('mic.noiseSuppression', { value: settingText(micProcessingStatus.noiseSuppression) }) }}</span>
+          <span>{{ t('mic.echoCancellation', { value: settingText(micProcessingStatus.echoCancellation) }) }}</span>
+          <span>{{ t('mic.autoGainControl', { value: settingText(micProcessingStatus.autoGainControl) }) }}</span>
+          <span v-if="micProcessingStatus.sampleRate">{{ t('mic.sampleRate', { rate: micProcessingStatus.sampleRate }) }}</span>
         </div>
       </details>
       <div class="live-workspace">
         <header class="live-workspace-header">
           <div class="live-heading">
-            <p class="eyebrow">LIVE TRANSLATION</p>
-            <h1>{{ isMobile && auxiliaryPanel ? auxiliaryPanelLabel : '实时字幕' }}</h1>
-            <p>{{ planDirections(store.plan) }}。已确定的句子会保存在课堂记录中。</p>
+            <p class="eyebrow">{{ t('live.eyebrow') }}</p>
+            <h1>{{ isMobile && auxiliaryPanel ? auxiliaryPanelLabel : t('live.title') }}</h1>
+            <p>{{ t('live.description', { directions: planDirections(store.plan) }) }}</p>
           </div>
-          <div class="panel-controls" role="group" aria-label="课堂视图">
-            <button :class="{ selected: !auxiliaryPanel }" :aria-pressed="!auxiliaryPanel" @click="auxiliaryPanel = null">字幕</button>
-            <button :class="{ selected: auxiliaryPanel === 'polish' }" :aria-pressed="auxiliaryPanel === 'polish'" @click="togglePanel('polish')">精修</button>
-            <button :class="{ selected: auxiliaryPanel === 'notes' }" :aria-pressed="auxiliaryPanel === 'notes'" @click="togglePanel('notes')">笔记</button>
-            <button :class="{ selected: auxiliaryPanel === 'materials' }" :aria-pressed="auxiliaryPanel === 'materials'" @click="togglePanel('materials')">材料</button>
+          <div class="panel-controls" role="group" :aria-label="t('live.views')">
+            <button :class="{ selected: !auxiliaryPanel }" :aria-pressed="!auxiliaryPanel" @click="auxiliaryPanel = null">{{ t('live.tabSubtitles') }}</button>
+            <button :class="{ selected: auxiliaryPanel === 'polish' }" :aria-pressed="auxiliaryPanel === 'polish'" @click="togglePanel('polish')">{{ t('live.tabPolish') }}</button>
+            <button :class="{ selected: auxiliaryPanel === 'notes' }" :aria-pressed="auxiliaryPanel === 'notes'" @click="togglePanel('notes')">{{ t('live.tabNotes') }}</button>
+            <button :class="{ selected: auxiliaryPanel === 'materials' }" :aria-pressed="auxiliaryPanel === 'materials'" @click="togglePanel('materials')">{{ t('live.tabMaterials') }}</button>
           </div>
         </header>
         <div class="live-body" :class="{ 'with-panel': auxiliaryPanel }">
-          <section class="transcript-panel" aria-label="实时双语字幕">
+          <section class="transcript-panel" :aria-label="t('live.transcript')">
             <TranscriptFeed :segments="store.segments" :plan="store.plan" :speakers="store.speakers" :jump-token="feedJumpToken" @star="store.toggleStar" @rename-speaker="onRenameSpeaker" />
           </section>
           <aside v-if="auxiliaryPanel" class="auxiliary-panel" :aria-label="auxiliaryPanelLabel">
-            <div class="auxiliary-top"><strong>{{ auxiliaryPanelLabel }}</strong><button @click="auxiliaryPanel = null">{{ isMobile ? '返回字幕' : '关闭面板' }}</button></div>
+            <div class="auxiliary-top"><strong>{{ auxiliaryPanelLabel }}</strong><button @click="auxiliaryPanel = null">{{ isMobile ? t('live.backToSubtitles') : t('live.closePanel') }}</button></div>
             <PolishFeed
               v-if="auxiliaryPanel === 'polish'"
               :chunks="store.polishChunks"
@@ -79,76 +79,76 @@
     <main v-else-if="showComplete" class="completion-workspace page-container">
       <section class="surface completion-card">
         <div class="completion-icon" aria-hidden="true">✓</div>
-        <p class="eyebrow">SESSION FINISHED</p>
-        <h1>这节课已结束</h1>
-        <p>字幕、精修译文、笔记与录音保存在课堂记录中。录音文件会长期保留，需手动删除。</p>
+        <p class="eyebrow">{{ t('done.eyebrow') }}</p>
+        <h1>{{ t('done.title') }}</h1>
+        <p>{{ t('done.description') }}</p>
         <div class="completion-meta">
           <span>{{ store.sessionName }}</span>
           <span>{{ planLabel(store.plan) }}</span>
-          <span>录音 {{ store.elapsedFormatted }}</span>
+          <span>{{ t('done.recorded', { time: store.elapsedFormatted }) }}</span>
         </div>
         <p v-if="micError" class="mic-error-inline" role="alert">{{ micError }}</p>
-        <p v-if="store.recordingStatus === 'unknown' || store.recordingStatus === 'unavailable'" class="mic-error-inline" role="status">录音状态尚未确认，请到课堂记录中检查。</p>
+        <p v-if="store.recordingStatus === 'unknown' || store.recordingStatus === 'unavailable'" class="mic-error-inline" role="status">{{ t('done.unconfirmed') }}</p>
         <div class="completion-actions">
-          <router-link class="button button-primary" to="/history">查看课堂记录</router-link>
-          <button class="button button-secondary" @click="newClass">准备下一节课</button>
+          <router-link class="button button-primary" to="/history">{{ t('done.openHistory') }}</router-link>
+          <button class="button button-secondary" @click="newClass">{{ t('done.nextClass') }}</button>
         </div>
       </section>
     </main>
 
     <main v-else class="prep-workspace page-container">
       <div class="prep-heading">
-        <p class="eyebrow">CLASSROOM SETUP</p>
-        <h1>准备这节课</h1>
-        <p>先确定课堂语言、显示语言和术语，再上传讲义。录音开始后，这些材料会辅助后续翻译。</p>
+        <p class="eyebrow">{{ t('prep.eyebrow') }}</p>
+        <h1>{{ t('prep.title') }}</h1>
+        <p>{{ t('prep.description') }}</p>
       </div>
       <div class="prep-grid">
         <div class="prep-main">
           <section class="surface prep-card" aria-labelledby="settings-title">
-            <div class="step-title"><span>01</span><div><h2 id="settings-title">课堂设置</h2><p>保存设置后即可上传材料；录音开始前还可以修改。</p></div></div>
+            <div class="step-title"><span>01</span><div><h2 id="settings-title">{{ t('prep.settingsTitle') }}</h2><p>{{ t('prep.settingsHelp') }}</p></div></div>
             <form @submit.prevent="savePreparation">
-              <label for="class-name">课堂名称</label>
-              <input id="class-name" v-model.trim="newSessionName" required maxlength="120" placeholder="例如：周一的经济学课" />
+              <label for="class-name">{{ t('prep.name') }}</label>
+              <input id="class-name" v-model.trim="newSessionName" required maxlength="120" :placeholder="t('prep.namePlaceholder')" />
               <fieldset class="plan-fields" :disabled="starting">
-                <legend>课堂语言</legend>
+                <legend>{{ t('prep.classLanguages') }}</legend>
                 <div class="language-fields">
-                  <div><label for="class-main">主讲语言</label><select id="class-main" v-model="mainLang"><option v-for="lang in LANGUAGE_CODES" :key="lang" :value="lang">{{ languageLabel(lang) }}</option></select></div>
-                  <div><label for="class-second">常用第二语言</label><select id="class-second" v-model="secondLang"><option value="">无</option><option v-for="lang in secondOptions" :key="lang" :value="lang">{{ languageLabel(lang) }}</option></select></div>
+                  <div><label for="class-main">{{ t('prep.mainLanguage') }}</label><select id="class-main" v-model="mainLang"><option v-for="lang in LANGUAGE_CODES" :key="lang" :value="lang">{{ languageLabel(lang) }}</option></select></div>
+                  <div><label for="class-second">{{ t('prep.secondLanguage') }}</label><select id="class-second" v-model="secondLang"><option value="">{{ t('prep.none') }}</option><option v-for="lang in secondOptions" :key="lang" :value="lang">{{ languageLabel(lang) }}</option></select></div>
                 </div>
                 <div class="chip-group" role="group" aria-labelledby="class-extra-label" aria-describedby="class-extra-help">
-                  <span id="class-extra-label" class="chip-label">偶尔出现</span>
+                  <span id="class-extra-label" class="chip-label">{{ t('prep.occasional') }}</span>
                   <label v-for="lang in extraOptions" :key="lang" class="chip" :class="{ selected: extraLangs.includes(lang) }">
                     <input type="checkbox" :checked="extraLangs.includes(lang)" :disabled="!extraLangs.includes(lang) && extraLangs.length >= MAX_EXTRA_LANGUAGES" @change="toggleExtra(lang)" />{{ languageLabel(lang) }}
                   </label>
                 </div>
-                <p id="class-extra-help" class="helper">最多 {{ MAX_EXTRA_LANGUAGES }} 种。只在明确听出这种语言时切换，适合个别同学的发言。</p>
+                <p id="class-extra-help" class="helper">{{ t('prep.occasionalHelp', { count: MAX_EXTRA_LANGUAGES }) }}</p>
               </fieldset>
               <fieldset class="plan-fields" :disabled="starting">
-                <legend>显示语言</legend>
+                <legend>{{ t('prep.displayLanguages') }}</legend>
                 <div class="language-fields">
-                  <div><label for="class-reading">阅读语言</label><select id="class-reading" v-model="readingLang"><option v-for="lang in readingOptions" :key="lang" :value="lang">{{ languageLabel(lang) }}</option></select></div>
+                  <div><label for="class-reading">{{ t('prep.readingLanguage') }}</label><select id="class-reading" v-model="readingLang"><option v-for="lang in readingOptions" :key="lang" :value="lang">{{ languageLabel(lang) }}</option></select></div>
                 </div>
                 <div class="chip-group" role="group" aria-labelledby="class-also-label" aria-describedby="class-display-help">
-                  <span id="class-also-label" class="chip-label">同时显示</span>
+                  <span id="class-also-label" class="chip-label">{{ t('prep.alsoShow') }}</span>
                   <label v-for="lang in alsoShowOptions" :key="lang" class="chip" :class="{ selected: alsoShow.includes(lang) }">
                     <input type="checkbox" :checked="alsoShow.includes(lang)" :disabled="!alsoShow.includes(lang) && alsoShow.length >= MAX_DISPLAY_LANGUAGES - 1" @change="toggleAlsoShow(lang)" />{{ languageLabel(lang) }}
                   </label>
                 </div>
-                <p id="class-display-help" class="helper">显示顺序：{{ formPlan.displayLanguages.map(languageLabel).join('、') }}。本分钟要点和课堂脉络用{{ languageLabel(readingLang) }}。<br />翻译方向：{{ planDirections(formPlan) }}。</p>
+                <p id="class-display-help" class="helper">{{ t('prep.displayOrder', { order: languageList(formPlan.displayLanguages), reading: inlineLanguageLabel(readingLang) }) }}<br />{{ t('prep.directions', { directions: planDirections(formPlan) }) }}</p>
               </fieldset>
               <p v-if="planError" class="form-error" role="alert">{{ planError }}</p>
-              <label for="class-glossary">术语表 <span class="optional">可选，每行一条</span></label>
+              <label for="class-glossary">{{ t('prep.glossary') }} <span class="optional">{{ t('prep.glossaryOptional') }}</span></label>
               <textarea id="class-glossary" v-model="newGlossaryText" rows="3" :placeholder="sourceExample + '=' + targetExample"></textarea>
-              <p class="helper">{{ languageLabel(mainLang) }}术语={{ languageLabel(readingLang) }}指定译法；课堂中仍可补充。</p>
+              <p class="helper">{{ t('prep.glossaryHelp', { main: inlineLanguageLabel(mainLang), reading: inlineLanguageLabel(readingLang) }) }}</p>
               <label class="processing-toggle" for="browser-processing">
                 <input id="browser-processing" v-model="browserProcessingEnabled" type="checkbox" :disabled="starting" />
-                <span><strong>浏览器降噪与回声消除</strong><small>默认开启。实际效果取决于设备；自动增益会请求关闭。</small></span>
+                <span><strong>{{ t('prep.processing') }}</strong><small>{{ t('prep.processingHelp') }}</small></span>
               </label>
               <p v-if="prepError" class="form-error" role="alert">{{ prepError }}</p>
               <p v-if="prepMessage" class="form-success" role="status">{{ prepMessage }}</p>
               <div class="settings-actions">
-                <button type="submit" class="button button-secondary" :disabled="preparing || starting">{{ preparing ? '保存中…' : isPrepared ? '保存设置' : '保存课堂设置' }}</button>
-                <button v-if="isPrepared" type="button" class="button button-quiet" @click="newClass">另建一节</button>
+                <button type="submit" class="button button-secondary" :disabled="preparing || starting">{{ preparing ? t('common.saving') : isPrepared ? t('prep.saveSettings') : t('prep.saveClass') }}</button>
+                <button v-if="isPrepared" type="button" class="button button-quiet" @click="newClass">{{ t('prep.another') }}</button>
               </div>
             </form>
           </section>
@@ -156,25 +156,25 @@
         </div>
         <aside class="prep-side">
           <section class="surface prep-card" aria-labelledby="materials-title">
-            <div class="step-title"><span>02</span><div><h2 id="materials-title">上传课程材料</h2><p>讲义中的相关文字会帮助翻译理解术语和语境。</p></div></div>
+            <div class="step-title"><span>02</span><div><h2 id="materials-title">{{ t('prep.materialsTitle') }}</h2><p>{{ t('prep.materialsHelp') }}</p></div></div>
             <MaterialsPanel v-if="isPrepared" :session-id="store.currentSessionId" compact @changed="materialsCount = $event" />
-            <div v-else class="materials-locked">先保存课堂设置，再上传课程材料。</div>
+            <div v-else class="materials-locked">{{ t('prep.materialsLocked') }}</div>
           </section>
           <section class="surface start-card">
-            <div class="step-title"><span>03</span><div><h2>开始录音</h2><p>准备好后开始实时字幕。</p></div></div>
-            <p>浏览器输出的录音原件会保存在此服务器，长期保留，需手动删除。</p>
-            <button class="button button-primary start-recording" :disabled="!isPrepared || starting || preparing" @click="beginRecording">{{ starting ? '正在连接麦克风…' : '开始录音与翻译' }}</button>
-            <p v-if="!isPrepared" class="helper">请先完成第 1 步。</p>
-            <p v-else class="helper">开始前会保存当前设置并请求麦克风权限。</p>
+            <div class="step-title"><span>03</span><div><h2>{{ t('prep.startTitle') }}</h2><p>{{ t('prep.startHelp') }}</p></div></div>
+            <p>{{ t('prep.startNote') }}</p>
+            <button class="button button-primary start-recording" :disabled="!isPrepared || starting || preparing" @click="beginRecording">{{ starting ? t('prep.starting') : t('prep.start') }}</button>
+            <p v-if="!isPrepared" class="helper">{{ t('prep.stepOneFirst') }}</p>
+            <p v-else class="helper">{{ t('prep.startSaves') }}</p>
           </section>
           <section v-if="pausedClasses.length" class="surface drafts-card">
-            <h2>继续已暂停的课堂</h2>
+            <h2>{{ t('prep.pausedTitle') }}</h2>
             <button v-for="item in pausedClasses" :key="item.id" class="draft-choice" :disabled="starting || preparing || resuming" @click="continuePausedClass(item.id)">
-              <strong>{{ item.name }}</strong><span>已录 {{ formatAudioTime((item.duration_seconds || 0) * 1000) }} · {{ planLabel(sessionPlan(item)) }}</span>
+              <strong>{{ item.name }}</strong><span>{{ t('prep.pausedItem', { time: formatAudioTime((item.duration_seconds || 0) * 1000), plan: planLabel(sessionPlan(item)) }) }}</span>
             </button>
           </section>
           <section v-if="drafts.length" class="surface drafts-card">
-            <h2>继续未开录的课堂</h2>
+            <h2>{{ t('prep.draftsTitle') }}</h2>
             <button v-for="draft in drafts" :key="draft.id" class="draft-choice" :class="{ active: draft.id === store.currentSessionId }" :disabled="starting || preparing" @click="selectDraft(draft.id)">
               <strong>{{ draft.name }}</strong><span>{{ planLabel(sessionPlan(draft)) }}</span>
             </button>
@@ -185,13 +185,13 @@
 
     <div v-if="showGlossaryModal" class="modal-backdrop" @click.self="closeGlossaryModal" @keydown.esc.stop="closeGlossaryModal">
       <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="glossary-title">
-        <h2 id="glossary-title">本节课术语表</h2>
-        <p>每行“{{ languageLabel(store.plan.languages[0]) }}术语={{ languageLabel(store.plan.displayLanguages[0]) }}译法”。新术语只影响后续字幕。</p>
-        <textarea id="editing-glossary" v-model="editingGlossaryText" rows="8" placeholder="原文术语=指定译法"></textarea>
+        <h2 id="glossary-title">{{ t('glossary.title') }}</h2>
+        <p>{{ t('glossary.help', { main: inlineLanguageLabel(store.plan.languages[0]), reading: inlineLanguageLabel(store.plan.displayLanguages[0]) }) }}</p>
+        <textarea id="editing-glossary" v-model="editingGlossaryText" rows="8" :placeholder="t('glossary.placeholder')"></textarea>
         <p v-if="glossaryError" class="form-error" role="alert">{{ glossaryError }}</p>
         <div class="modal-actions">
-          <button class="button button-secondary" @click="closeGlossaryModal">取消</button>
-          <button class="button button-primary" :disabled="glossarySaving" @click="saveGlossary">{{ glossarySaving ? '保存中…' : '保存术语' }}</button>
+          <button class="button button-secondary" @click="closeGlossaryModal">{{ t('common.cancel') }}</button>
+          <button class="button button-primary" :disabled="glossarySaving" @click="saveGlossary">{{ glossarySaving ? t('common.saving') : t('glossary.saveTerms') }}</button>
         </div>
       </div>
     </div>
@@ -209,10 +209,12 @@ import NotesPad from '../components/NotesPad.vue'
 import MaterialsPanel from '../components/MaterialsPanel.vue'
 import {
   DEFAULT_PLAN, LANGUAGE_CODES, MAX_DISPLAY_LANGUAGES, MAX_EXTRA_LANGUAGES,
-  languageLabel, planDirections, planLabel, sessionPlan, validatePlan,
+  inlineLanguageLabel, languageLabel, languageList, planDirections, planLabel, sessionPlan, validatePlan,
 } from '../utils/languages.js'
 import { formatAudioTime } from '../utils/polish.js'
 import { createLevelMeter } from '../utils/level.js'
+import { formatDateTime, locale, t, termExample } from '../i18n/index.js'
+import { errorText } from '../i18n/apiErrors.js'
 
 const store = useSessionStore()
 let micStream = null
@@ -240,13 +242,18 @@ watch(() => store.recordingStatus, (status, previous) => {
   if (status === 'capturing' && previous !== 'capturing') feedJumpToken.value += 1
 })
 
+// A track setting as an i18n state (mic.on / mic.off / …) or the browser's own string value.
+const SETTING_STATES = ['on', 'off', 'notReported', 'supportedNotReported', 'notDeclared']
 function actualAudioSetting(settings, supported, name) {
   const value = settings[name]
-  if (value === true) return '已开启'
-  if (value === false) return '已关闭'
-  if (typeof value === 'string' && value) return value
-  if (!supported) return '浏览器未报告'
-  return supported[name] ? '支持，但未报告状态' : '浏览器未声明支持'
+  if (value === true) return { state: 'on' }
+  if (value === false) return { state: 'off' }
+  if (typeof value === 'string' && value) return { value }
+  if (!supported) return { state: 'notReported' }
+  return { state: supported[name] ? 'supportedNotReported' : 'notDeclared' }
+}
+function settingText(setting) {
+  return SETTING_STATES.includes(setting?.state) ? t(`mic.${setting.state}`) : setting?.value ?? ''
 }
 
 function stopMicrophone() {
@@ -305,15 +312,24 @@ onMounted(() => {
 onUnmounted(() => window.removeEventListener('resize', onResize))
 
 const auxiliaryPanel = ref(null)
-const auxiliaryPanelLabel = computed(() => ({
-  polish: '精修译文', notes: '课堂笔记', materials: '课堂材料',
-})[auxiliaryPanel.value] || '')
+const PANEL_LABELS = { polish: 'live.panelPolish', notes: 'live.panelNotes', materials: 'live.panelMaterials' }
+const auxiliaryPanelLabel = computed(() => (PANEL_LABELS[auxiliaryPanel.value] ? t(PANEL_LABELS[auxiliaryPanel.value]) : ''))
 function togglePanel(panel) {
   auxiliaryPanel.value = auxiliaryPanel.value === panel ? null : panel
 }
 
-const today = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' })
-const newSessionName = ref(`课堂 · ${today}`)
+// Default class name in the interface language: 课堂 · 10月5日, Class · October 5, … The server
+// treats every one of these as "no topic" (backend/ws/handler.py _DEFAULT_NAME_RE).
+const today = new Date()
+function defaultSessionName(ui = locale.value) {
+  return t('prep.defaultName', { date: formatDateTime(today, { month: 'long', day: 'numeric' }, ui) }, ui)
+}
+const newSessionName = ref(defaultSessionName())
+// The untouched default name of a class not saved yet follows a switch of the interface
+// language; a saved class keeps its name (data).
+watch(locale, (ui, previous) => {
+  if (!isPrepared.value && newSessionName.value === defaultSessionName(previous)) newSessionName.value = defaultSessionName(ui)
+})
 const newGlossaryText = ref('')
 
 // Language plan form (contract 2026-10-05): frequent languages (main + optional second),
@@ -362,9 +378,9 @@ function setPlanForm(plan) {
   readingLang.value = plan.displayLanguages[0]
   alsoShow.value = plan.displayLanguages.slice(1)
 }
-const TERM_EXAMPLES = { ko: '선물', zh: '期货', en: 'futures', ru: 'фьючерсы' }
-const sourceExample = computed(() => TERM_EXAMPLES[mainLang.value] || '原词')
-const targetExample = computed(() => TERM_EXAMPLES[readingLang.value] || '译法')
+// Glossary placeholder: an example term in the main and the reading language ("선물=期货").
+const sourceExample = computed(() => termExample(mainLang.value))
+const targetExample = computed(() => termExample(readingLang.value))
 const drafts = ref([])
 const pausedClasses = ref([])
 const materialsCount = ref(0)
@@ -384,13 +400,13 @@ const showLive = computed(() =>
 const pauseNotice = computed(() => {
   switch (store.recordingStatus) {
     case 'pausing':
-      return store.finalizeWarning ? '暂停前的整理时间较长，内容会保存到课堂记录。' : '正在暂停：保存最后一句和这一分钟的精修…'
+      return store.finalizeWarning ? t('live.pausingSlow') : t('live.pausing')
     case 'reconnecting':
-      return '连接中断，正在自动重连。已显示的内容都在，录音会接着保存。'
+      return t('live.reconnecting')
     case 'paused':
-      if (store.pauseReason === 'connection') return '连接中断，已暂停，可点继续恢复。'
-      if (store.pauseReason === 'microphone') return '麦克风不可用，课堂已暂停。检查设备后可点继续。'
-      return '课堂已暂停。字幕、精修和录音都已保存，点“继续”接着录同一节课。'
+      if (store.pauseReason === 'connection') return t('live.pausedConnection')
+      if (store.pauseReason === 'microphone') return t('live.pausedMicrophone')
+      return t('live.paused')
     default:
       return ''
   }
@@ -407,16 +423,16 @@ let modalReturnFocus = null
 
 function parseGlossary(text) {
   const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
-  if (lines.length > 50) throw new Error('术语最多 50 条')
+  if (lines.length > 50) throw new Error(t('glossary.tooMany', { count: 50 }))
   return lines.map((line, index) => {
     const separator = line.indexOf('=')
     if (separator < 1 || separator === line.length - 1) {
-      throw new Error(`第 ${index + 1} 行请写成“原文术语=翻译术语”`)
+      throw new Error(t('glossary.lineFormat', { line: index + 1 }))
     }
     const source = line.slice(0, separator).trim()
     const target = line.slice(separator + 1).trim()
     if (!source || !target || source.length > 80 || target.length > 80) {
-      throw new Error(`第 ${index + 1} 行的两侧须为 1–80 字`)
+      throw new Error(t('glossary.lineLength', { line: index + 1 }))
     }
     return { source, target }
   })
@@ -441,13 +457,13 @@ async function refreshDrafts() {
 }
 async function continuePausedClass(id) {
   if (starting.value || preparing.value || resuming.value) return
-  if (isPrepared.value && !confirm('切换到已暂停的课堂？当前未保存的修改会丢失，已保存的课堂和材料会保留。')) return
+  if (isPrepared.value && !confirm(t('prep.switchPaused'))) return
   prepError.value = ''
   prepMessage.value = ''
   try {
     await store.loadPausedSession(id)
   } catch (error) {
-    prepError.value = error.response?.data?.detail || error.message
+    prepError.value = errorText(error)
     return
   }
   auxiliaryPanel.value = null
@@ -455,16 +471,16 @@ async function continuePausedClass(id) {
 }
 async function selectDraft(id) {
   if (id === store.currentSessionId) return
-  if (isPrepared.value && !confirm('切换课堂？当前未保存的修改会丢失，已保存的材料会保留。')) return
+  if (isPrepared.value && !confirm(t('prep.switchDraft'))) return
   prepError.value = ''
   prepMessage.value = ''
   try {
     await store.loadPreparedSession(id)
     syncDraftForm()
     materialsCount.value = 0
-    prepMessage.value = '已载入未开录的课堂。'
+    prepMessage.value = t('prep.draftLoaded')
   } catch (error) {
-    prepError.value = error.response?.data?.detail || error.message
+    prepError.value = errorText(error)
   }
 }
 async function savePreparation() {
@@ -475,7 +491,7 @@ async function savePreparation() {
   try { terms = parseGlossary(newGlossaryText.value) }
   catch (error) { prepError.value = error.message; return }
   if (!newSessionName.value.trim()) {
-    prepError.value = '请输入课堂名称。'
+    prepError.value = t('prep.nameRequired')
     return
   }
   if (planError.value) {
@@ -488,22 +504,22 @@ async function savePreparation() {
     const option = { plan }
     if (isPrepared.value) {
       await store.updatePreparedSession(newSessionName.value.trim(), terms, plan.languages[0], plan.displayLanguages[0], option)
-      prepMessage.value = '课堂设置已保存。'
+      prepMessage.value = t('prep.saved')
     } else {
       await store.prepareSession(newSessionName.value.trim(), terms, plan.languages[0], plan.displayLanguages[0], option)
-      prepMessage.value = '课堂已保存，现在可以上传材料。'
+      prepMessage.value = t('prep.created')
     }
     await refreshDrafts()
   } catch (error) {
-    prepError.value = error.response?.data?.detail || error.message
+    prepError.value = errorText(error)
   } finally { preparing.value = false }
 }
 function newClass() {
-  if (isPrepared.value && !confirm('准备下一节课？当前未保存的修改会丢失，已保存的课堂和材料会保留。')) return
+  if (isPrepared.value && !confirm(t('prep.confirmNext'))) return
   startAttempt += 1
   stopMicrophone()
   store.resetSession()
-  newSessionName.value = `课堂 · ${today}`
+  newSessionName.value = defaultSessionName()
   setPlanForm(DEFAULT_PLAN)
   newGlossaryText.value = ''
   micError.value = ''
@@ -528,7 +544,7 @@ async function beginRecording() {
   try { terms = parseGlossary(newGlossaryText.value) }
   catch (error) { prepError.value = error.message; return }
   if (!newSessionName.value.trim()) {
-    prepError.value = '请输入课堂名称。'
+    prepError.value = t('prep.nameRequired')
     return
   }
   if (planError.value) {
@@ -571,7 +587,7 @@ async function beginRecording() {
     // Keep a started class resumable; only 结束 ends it.
     if (connected || store.isRecording) store.pauseSession('microphone')
     if (attempt === startAttempt && !viewUnmounted) {
-      prepError.value = error.response?.data?.detail || error.message
+      prepError.value = errorText(error)
       micError.value = error.message
     }
   } finally { starting.value = false }
@@ -607,13 +623,13 @@ async function resumeClass() {
     stopMicrophone()
     micProcessingStatus.value = null
     if (connected || store.isRecording) store.pauseSession('microphone')
-    if (attempt === startAttempt && !viewUnmounted) micError.value = `无法继续录音：${error.message}`
+    if (attempt === startAttempt && !viewUnmounted) micError.value = t('mic.resumeFailed', { message: error.message })
   } finally { resuming.value = false }
 }
 
 // Called by the store after an automatic reconnect: the socket is open again.
 async function reacquireMicrophone() {
-  if (viewUnmounted) throw new Error('页面已关闭')
+  if (viewUnmounted) throw new Error(t('mic.pageClosed'))
   stopMicrophone()
   try {
     await prepareMicrophone(browserProcessingEnabled.value)
@@ -623,7 +639,7 @@ async function reacquireMicrophone() {
   } catch (error) {
     stopMicrophone()
     micProcessingStatus.value = null
-    if (!viewUnmounted) micError.value = `已重新连接，但麦克风无法启动：${error.message}`
+    if (!viewUnmounted) micError.value = t('mic.reconnectFailed', { message: error.message })
     throw error
   }
 }
@@ -656,17 +672,17 @@ async function saveGlossary() {
     await store.updateGlossary(terms)
     await closeGlossaryModal()
   } catch (error) {
-    glossaryError.value = error.response?.data?.detail || error.message
+    glossaryError.value = errorText(error)
   } finally { glossarySaving.value = false }
 }
 
 async function prepareMicrophone(enableBrowserProcessing) {
   if (!navigator.mediaDevices?.getUserMedia) {
-    throw new Error('当前浏览器无法使用麦克风。请通过本机 localhost 或 HTTPS 地址打开课堂。')
+    throw new Error(t('mic.unavailable'))
   }
   audioContext = new AudioContext({ sampleRate: 16000 })
   if (audioContext.sampleRate !== 16000) {
-    throw new Error(`浏览器输出 ${audioContext.sampleRate} Hz 音频，服务器要求 16000 Hz；请换用支持该采样率的浏览器。`)
+    throw new Error(t('mic.wrongRate', { rate: audioContext.sampleRate }))
   }
   // Prefer these settings without failing the entire capture on browsers that
   // cannot honor them. The actual values are shown from MediaStreamTrack.
@@ -680,15 +696,15 @@ async function prepareMicrophone(enableBrowserProcessing) {
   const resumePromise = audioContext.resume()
   const [media, resumed] = await Promise.allSettled([mediaPromise, resumePromise])
   if (media.status === 'fulfilled') micStream = media.value
-  if (media.status === 'rejected') throw new Error('麦克风访问失败：' + media.reason.message)
+  if (media.status === 'rejected') throw new Error(t('mic.accessFailed', { message: media.reason.message }))
   if (!micStream.getAudioTracks().some(track => track.readyState === 'live')) {
-    throw new Error('麦克风权限已允许，但浏览器没有提供正在工作的音频轨道。')
+    throw new Error(t('mic.noTrack'))
   }
   const track = micStream.getAudioTracks()[0]
   const actual = track.getSettings?.() || {}
   const supported = navigator.mediaDevices.getSupportedConstraints?.() || null
   micProcessingStatus.value = {
-    device: track.label || '默认麦克风',
+    device: track.label || '',
     requested: enableBrowserProcessing,
     noiseSuppression: actualAudioSetting(actual, supported, 'noiseSuppression'),
     echoCancellation: actualAudioSetting(actual, supported, 'echoCancellation'),
@@ -696,9 +712,9 @@ async function prepareMicrophone(enableBrowserProcessing) {
     sampleRate: actual.sampleRate || null,
   }
   if (resumed.status === 'rejected' || audioContext.state !== 'running') {
-    throw new Error('浏览器未能启动音频处理，请检查麦克风权限。')
+    throw new Error(t('mic.audioFailed'))
   }
-  if (viewUnmounted) throw new Error('页面已关闭')
+  if (viewUnmounted) throw new Error(t('mic.pageClosed'))
 }
 
 // Every microphone block: sent (or kept until the socket opens) first, then measured.
@@ -776,7 +792,7 @@ function startAudioWatchdog() {
         console.error('Microphone fallback failed', error)
       }
     }
-    micError.value = '麦克风已授权，但浏览器未产生音频块。课堂已暂停；请检查系统输入设备，或换 Chrome/Edge 后点继续。'
+    micError.value = t('mic.noBlocks')
     store.pauseSession('microphone')
   }, 3500)
 }
@@ -785,14 +801,14 @@ function startAudioWatchdog() {
 // store; the watchdog is started by the caller once the socket is open.
 async function attachMicrophone() {
   if (!micStream || !audioContext) {
-    throw new Error('录音连接未就绪')
+    throw new Error(t('mic.notReady'))
   }
   audioBlocksCaptured = 0
   audioSource = audioContext.createMediaStreamSource(micStream)
   const track = micStream.getAudioTracks()[0]
   track.onended = () => {
     if (!store.isRecording) return
-    micError.value = '麦克风音频轨道已停止，课堂已暂停。检查设备后可点继续。'
+    micError.value = t('mic.trackEnded')
     store.pauseSession('microphone')
   }
   if (audioContext.audioWorklet?.addModule) {
@@ -831,8 +847,8 @@ async function onStop() {
   } catch (error) {
     if (viewUnmounted) return
     actionError.value = error.response?.status === 409
-      ? '服务器仍在保存断线前的内容，请稍后再点结束。'
-      : `结束失败：${error.response?.data?.detail || error.message}`
+      ? t('actions.endBusy')
+      : t('actions.endFailed', { message: errorText(error) })
   }
 }
 
@@ -845,7 +861,7 @@ async function onRenameSpeaker(index, name) {
     await store.renameSpeaker(index, name)
   } catch (error) {
     if (viewUnmounted) return
-    speakerError.value = `说话人名称保存失败：${error.response?.data?.detail || error.message}`
+    speakerError.value = t('actions.speakerFailed', { message: errorText(error) })
     speakerErrorTimeout = setTimeout(() => { speakerError.value = '' }, 6000)
   }
 }
@@ -855,16 +871,16 @@ async function onRename(name) {
   try {
     await axios.patch(`/api/sessions/${store.currentSessionId}`, { name: name.trim() })
     store.sessionName = name.trim()
-  } catch (_) { alert('课堂名称保存失败。') }
+  } catch (_) { alert(t('actions.renameFailed')) }
 }
 
 async function onSummary() {
   if (!store.currentSessionId) return
   try {
     const res = await axios.post(`/api/sessions/${store.currentSessionId}/summary`)
-    alert('课堂总结已生成。\n\n' + res.data.summary.substring(0, 300) + (res.data.summary.length > 300 ? '…' : ''))
+    alert(t('actions.summaryDone') + '\n\n' + res.data.summary.substring(0, 300) + (res.data.summary.length > 300 ? '…' : ''))
   } catch (e) {
-    alert('生成总结失败：' + e.message)
+    alert(t('actions.summaryFailed', { message: errorText(e) }))
   }
 }
 </script>
@@ -885,7 +901,7 @@ async function onSummary() {
 .prep-card form { display: grid; gap: .46rem; }
 .prep-card form > label:not(.processing-toggle) { margin-top: .65rem; }
 .optional { color: var(--text-muted); font-weight: 450; }
-.language-fields { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; margin-top: .5rem; }
+.language-fields { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; margin-top: .5rem; align-items: end; }
 .language-fields > div { display: grid; gap: .4rem; min-width: 0; }
 .plan-fields { display: grid; gap: .45rem; margin: .8rem 0 0; padding: .75rem .85rem .55rem; border: 1px solid var(--border); border-radius: 12px; background: #f9fbfd; min-width: 0; }
 .plan-fields legend { padding: 0 .3rem; font-size: .87rem; font-weight: 720; }

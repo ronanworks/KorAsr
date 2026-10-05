@@ -112,6 +112,12 @@ spoken language → that target's live translation).
   - txt: a one-target sentence stays `原文 | 译文`; several targets → one indented line
     per target (`    中文: …`); sentences not in the main language are tagged `[英语→中文/韩语]`;
   - md: columns `| Time | 原文 | 中文 | 韩语 |` (one per display language).
+  - Optional `ui_lang=zh|ko|en|ru` (`GET …/export?format=md&ui_lang=en`; `ko-KR` → `ko`, unknown →
+    `zh`): the interface language of the headers and labels — plan line, columns (`| Time | Original
+    | Chinese | Korean |`), language names and tags, default speaker labels (`Speaker 2`), section
+    titles. Transcripts, translations, key points, outline, notes and speaker names stay as saved.
+    Without it (and with `zh`) the export is byte for byte the one above. The frontend sends its
+    current interface language.
 
 ## 4. Storage
 

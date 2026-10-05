@@ -1,22 +1,22 @@
 <template>
-  <section class="status-bar" aria-label="课堂控制">
+  <section class="status-bar" :aria-label="t('status.controls')">
     <div class="session-context">
       <div class="session-line">
         <span class="state-dot" :class="{ live: isRecording, saving: isFinalizing || recordingStatus === 'pausing', paused: canResume }" aria-hidden="true"></span>
-        <input v-if="isRecording || frozenTimerLabel" class="session-name-input" :value="sessionName" aria-label="课堂名称" @blur="$emit('rename', $event.target.value)" />
-        <strong v-else class="session-name">{{ sessionName || '尚未开始课堂' }}</strong>
-        <span v-if="isRecording" class="timer">录音 {{ elapsedFormatted }}</span>
+        <input v-if="isRecording || frozenTimerLabel" class="session-name-input" :value="sessionName" :aria-label="t('status.sessionName')" @blur="$emit('rename', $event.target.value)" />
+        <strong v-else class="session-name">{{ sessionName || t('status.noClass') }}</strong>
+        <span v-if="isRecording" class="timer">{{ t('status.recording', { time: elapsedFormatted }) }}</span>
         <span v-else-if="frozenTimerLabel" class="timer frozen">{{ frozenTimerLabel }} · {{ elapsedFormatted }}</span>
         <span
           v-if="isRecording && inputLevel != null"
           class="level"
           role="meter"
-          aria-label="输入电平"
+          :aria-label="t('status.level')"
           :aria-valuemin="LEVEL_MIN_DB"
           aria-valuemax="0"
           :aria-valuenow="levelRounded"
           :aria-valuetext="`${levelRounded} dBFS`"
-          :title="`输入电平 ${levelRounded} dBFS（讲话低于 ${QUIET_SPEECH_DB} dBFS 时识别容易漏句）`"
+          :title="t('status.levelTitle', { level: levelRounded, quiet: QUIET_SPEECH_DB })"
         >
           <span class="level-track" aria-hidden="true">
             <span class="level-fill" :class="{ quiet: levelQuiet }" :style="{ width: `${levelPercent(inputLevel)}%` }"></span>
@@ -28,7 +28,7 @@
           v-if="showVadGain"
           :model-value="vadGain"
           describedby="vad-gain-help"
-          :help="VAD_GAIN_HELP"
+          :help="t('vadGain.help')"
           @update:model-value="$emit('vad-gain', $event)"
         />
       </div>
@@ -36,28 +36,28 @@
         <span :title="directionTitle">{{ planLabel(plan) }}</span>
         <span aria-hidden="true">·</span>
         <span role="status">{{ recordingText }}</span>
-        <span v-if="recordingInfo?.low_disk_warning" class="storage-warning" role="alert">服务器磁盘空间不足，请及时下载并清理旧录音</span>
-        <a v-if="recordingStatus === 'saved' && recordingInfo?.available" :href="downloadUrl" download>下载录音{{ downloadIsPcm ? ' PCM' : ' WAV' }}</a>
+        <span v-if="recordingInfo?.low_disk_warning" class="storage-warning" role="alert">{{ t('status.lowDisk') }}</span>
+        <a v-if="recordingStatus === 'saved' && recordingInfo?.available" :href="downloadUrl" download>{{ t('status.downloadRecording', { format: downloadIsPcm ? 'PCM' : 'WAV' }) }}</a>
       </div>
-      <p v-if="isFinalizing" class="finalizing" role="status">{{ finalizeWarning ? '整理时间较长，结果会保存到课堂记录' : '正在保存最后一段字幕和录音…' }}</p>
-      <p v-if="showVadGain" id="vad-gain-help" class="vad-gain-help">{{ VAD_GAIN_HELP }}</p>
+      <p v-if="isFinalizing" class="finalizing" role="status">{{ finalizeWarning ? t('status.finalizingSlow') : t('status.finalizing') }}</p>
+      <p v-if="showVadGain" id="vad-gain-help" class="vad-gain-help">{{ t('vadGain.help') }}</p>
       <p v-if="isRecording && levelQuiet" class="level-hint" role="status">
-        <span>声音太小：把设备靠近讲话人，或换外接麦克风</span>
-        <button v-if="!vadGain" type="button" class="hint-action" @click="$emit('vad-gain', true)">打开小声增强</button>
+        <span>{{ t('status.tooQuiet') }}</span>
+        <button v-if="!vadGain" type="button" class="hint-action" @click="$emit('vad-gain', true)">{{ t('vadGain.enable') }}</button>
       </p>
     </div>
     <div class="controls">
       <template v-if="isRecording">
-        <button class="control quiet" @click="$emit('glossary')">术语表</button>
-        <button class="control quiet summary" @click="$emit('summary')">生成总结</button>
-        <button class="control pause" @click="$emit('pause')">暂停</button>
-        <button class="control stop" @click="$emit('stop')">结束</button>
+        <button class="control quiet" @click="$emit('glossary')">{{ t('status.glossary') }}</button>
+        <button class="control quiet summary" @click="$emit('summary')">{{ t('status.summary') }}</button>
+        <button class="control pause" @click="$emit('pause')">{{ t('status.pause') }}</button>
+        <button class="control stop" @click="$emit('stop')">{{ t('status.stop') }}</button>
       </template>
       <template v-else-if="canResume">
-        <button class="control quiet" :disabled="busy" @click="$emit('glossary')">术语表</button>
-        <button class="control quiet summary" :disabled="busy" @click="$emit('summary')">生成总结</button>
-        <button class="control resume" :disabled="busy" @click="$emit('resume')">{{ busy ? '连接中…' : '继续' }}</button>
-        <button class="control stop" :disabled="busy" @click="$emit('stop')">结束</button>
+        <button class="control quiet" :disabled="busy" @click="$emit('glossary')">{{ t('status.glossary') }}</button>
+        <button class="control quiet summary" :disabled="busy" @click="$emit('summary')">{{ t('status.summary') }}</button>
+        <button class="control resume" :disabled="busy" @click="$emit('resume')">{{ busy ? t('status.connectingShort') : t('status.resume') }}</button>
+        <button class="control stop" :disabled="busy" @click="$emit('stop')">{{ t('status.stop') }}</button>
       </template>
       <button v-else-if="transitionLabel" class="control quiet" disabled>{{ transitionLabel }}</button>
     </div>
@@ -69,6 +69,7 @@ import { computed } from 'vue'
 import VadGainToggle from './VadGainToggle.vue'
 import { DEFAULT_PLAN, planDirections, planLabel } from '../utils/languages.js'
 import { LEVEL_MIN_DB, QUIET_SPEECH_DB, levelPercent } from '../utils/level.js'
+import { t } from '../i18n/index.js'
 
 const props = defineProps({
   isRecording: Boolean, isConnected: Boolean, isFinalizing: Boolean, finalizeWarning: Boolean,
@@ -90,37 +91,38 @@ defineEmits(['stop', 'pause', 'resume', 'summary', 'rename', 'glossary', 'vad-ga
 const canResume = computed(() => ['paused', 'reconnecting'].includes(props.recordingStatus))
 // The switch can be set while recording and while paused (sent when the class continues).
 const showVadGain = computed(() => props.isRecording || canResume.value)
-const VAD_GAIN_HELP = '讲话人离得远、字幕出不来时打开；可能多出少量错句'
 
-const frozenTimerLabel = computed(() => ({
-  pausing: '暂停中', paused: '已暂停', reconnecting: '重连中', resuming: '连接中',
-})[props.recordingStatus] || '')
+const FROZEN_LABELS = {
+  pausing: 'status.frozenPausing', paused: 'status.frozenPaused',
+  reconnecting: 'status.frozenReconnecting', resuming: 'status.frozenResuming',
+}
+const frozenTimerLabel = computed(() => (FROZEN_LABELS[props.recordingStatus] ? t(FROZEN_LABELS[props.recordingStatus]) : ''))
 
 const transitionLabel = computed(() => {
   if (props.isRecording) return ''
-  if (props.recordingStatus === 'pausing') return '正在暂停…'
-  if (['connecting', 'resuming'].includes(props.recordingStatus)) return '正在连接…'
+  if (props.recordingStatus === 'pausing') return t('status.pausingShort')
+  if (['connecting', 'resuming'].includes(props.recordingStatus)) return t('status.connectingLong')
   return ''
 })
 
 // e.g. "翻译方向：韩语→中文；中文→韩语；英语→中文、韩语"
-const directionTitle = computed(() => `翻译方向：${planDirections(props.plan)}`)
+const directionTitle = computed(() => t('status.directions', { directions: planDirections(props.plan) }))
 
 const recordingText = computed(() => {
   switch (props.recordingStatus) {
-    case 'connecting': return '正在连接麦克风'
-    case 'capturing': return '录音正在保存到服务器'
-    case 'pausing': return '正在保存暂停前的内容'
-    case 'paused': return props.pauseReason === 'connection' ? '连接中断，已暂停' : '已暂停，录音已保存'
+    case 'connecting': return t('status.stateConnecting')
+    case 'capturing': return t('status.stateCapturing')
+    case 'pausing': return t('status.statePausing')
+    case 'paused': return props.pauseReason === 'connection' ? t('status.statePausedConnection') : t('status.statePaused')
     case 'reconnecting': return props.reconnectAttempt
-      ? `连接中断，正在重连（${props.reconnectAttempt}/${props.reconnectTotal}）`
-      : '连接中断，稍后自动重连'
-    case 'resuming': return '正在恢复录音'
-    case 'saving': return '录音收尾中'
-    case 'saved': return '录音已保存'
-    case 'unavailable': return '没有可下载的录音'
-    case 'unknown': return '录音状态待确认'
-    default: return '开始后自动保存完整录音'
+      ? t('status.stateReconnectingAttempt', { attempt: props.reconnectAttempt, total: props.reconnectTotal })
+      : t('status.stateReconnecting')
+    case 'resuming': return t('status.stateResuming')
+    case 'saving': return t('status.stateSaving')
+    case 'saved': return t('status.stateSaved')
+    case 'unavailable': return t('status.stateUnavailable')
+    case 'unknown': return t('status.stateUnknown')
+    default: return t('status.stateIdle')
   }
 })
 const downloadIsPcm = computed(() => (props.recordingInfo?.size_bytes || 0) > 0xFFFFFFFF - 36)
@@ -153,7 +155,7 @@ const downloadUrl = computed(() => downloadIsPcm.value ? props.recordingInfo?.pc
 .hint-action { min-height: 32px; padding: .2rem .7rem; border: 1px solid #e3c88f; border-radius: 999px; background: #fff8e9; color: #7a4d06; font-size: .76rem; font-weight: 680; }
 .vad-gain-help { color: var(--text-muted); font-size: .74rem; line-height: 1.45; margin: .15rem 0 0 1.1rem; }
 @media (pointer: coarse) { .hint-action { min-height: 44px; } }
-.controls { display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; justify-content: flex-end; }
+.controls { display: flex; flex: none; align-items: center; flex-wrap: wrap; gap: .45rem; justify-content: flex-end; }
 .control { min-height: 44px; padding: .5rem 1rem; border: 0; border-radius: 11px; font-weight: 680; white-space: nowrap; }
 .control.start,.control.resume { background: var(--accent); color: #fff; }
 .control.pause { background: var(--accent-soft); color: var(--accent); border: 1px solid #cfdef2; }

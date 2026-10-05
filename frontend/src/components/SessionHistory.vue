@@ -3,18 +3,18 @@
     <button class="open-session" type="button" @click="$emit('select', session.id)">
       <span class="title">{{ session.name }}</span>
       <span class="meta">{{ formatDate(session.started_at) }} · {{ planLabel(sessionPlan(session)) }}</span>
-      <span class="meta">{{ durationText }} · {{ session.segment_count }} 段字幕</span>
+      <span class="meta">{{ durationText }} · {{ t('item.segments', { count: session.segment_count }) }}</span>
     </button>
     <div class="actions">
-      <span v-if="isPaused" class="tag paused-tag">已暂停</span>
-      <span v-else-if="session.summary" class="tag">已生成总结</span>
+      <span v-if="isPaused" class="tag paused-tag">{{ t('item.paused') }}</span>
+      <span v-else-if="session.summary" class="tag">{{ t('item.summarized') }}</span>
       <template v-if="isPaused">
-        <button class="btn-resume" type="button" :disabled="busy" @click="$emit('resume', session.id)">继续上课</button>
-        <button class="btn-end" type="button" :disabled="busy" @click="$emit('end', session.id)">结束课堂</button>
+        <button class="btn-resume" type="button" :disabled="busy" @click="$emit('resume', session.id)">{{ t('item.resume') }}</button>
+        <button class="btn-end" type="button" :disabled="busy" @click="$emit('end', session.id)">{{ t('item.end') }}</button>
       </template>
-      <a :href="`/api/sessions/${session.id}/export?format=md`" class="btn-export" download title="下载 Markdown 字幕">MD</a>
-      <a :href="`/api/sessions/${session.id}/export?format=txt`" class="btn-export" download title="下载纯文本字幕">TXT</a>
-      <button class="btn-delete" type="button" @click="$emit('delete', session.id)">删除</button>
+      <a :href="exportUrl('md')" class="btn-export" download :title="t('item.exportMd')">MD</a>
+      <a :href="exportUrl('txt')" class="btn-export" download :title="t('item.exportTxt')">TXT</a>
+      <button class="btn-delete" type="button" @click="$emit('delete', session.id)">{{ t('common.delete') }}</button>
     </div>
   </article>
 </template>
@@ -22,23 +22,28 @@
 <script setup>
 import { computed } from 'vue'
 import { planLabel, sessionPlan } from '../utils/languages.js'
+import { formatDateTime, locale, t } from '../i18n/index.js'
 const props = defineProps({ session: Object, busy: Boolean })
 defineEmits(['select', 'delete', 'resume', 'end'])
 const isPaused = computed(() => props.session.recording_state === 'paused')
 // duration_seconds = recorded audio (pauses excluded), saved at every pause and at the end.
 const durationText = computed(() => {
   const state = props.session.recording_state
-  if (state === 'recording') return '录音中'
-  if (state === 'created') return '未开录'
+  if (state === 'recording') return t('item.recording')
+  if (state === 'created') return t('item.notStarted')
   const recorded = formatDuration(props.session.duration_seconds || 0)
-  return state === 'paused' ? `已录 ${recorded}` : recorded
+  return state === 'paused' ? t('item.recorded', { duration: recorded }) : recorded
 })
 function formatDate(iso) {
-  return new Date(iso).toLocaleString('zh-CN', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  return formatDateTime(iso, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 function formatDuration(seconds) {
   const minutes = Math.floor(seconds / 60)
-  return minutes ? `${minutes} 分钟` : `${Math.floor(seconds)} 秒`
+  return minutes ? t('item.minutes', { count: minutes }) : t('item.seconds', { count: Math.floor(seconds) })
+}
+// Exports label the columns and languages in the interface language (export ui_lang).
+function exportUrl(format) {
+  return `/api/sessions/${props.session.id}/export?format=${format}&ui_lang=${locale.value}`
 }
 </script>
 

@@ -1,11 +1,11 @@
 <template>
   <div class="history-view">
     <div class="header">
-      <div><p class="eyebrow">ARCHIVE</p><h1>课堂记录</h1></div>
-      <input v-model="search" placeholder="搜索课堂名称…" class="search" aria-label="搜索课堂记录" />
+      <div><p class="eyebrow">{{ t('history.eyebrow') }}</p><h1>{{ t('history.title') }}</h1></div>
+      <input v-model="search" :placeholder="t('history.search')" class="search" :aria-label="t('history.searchLabel')" />
     </div>
     <div v-if="liveStore.isFinalizing" class="finishing-banner" role="status">
-      录音正在收尾，精修译文完成后此页会自动更新。
+      {{ t('history.finishing') }}
     </div>
 
     <!-- Session list -->
@@ -20,48 +20,48 @@
         @resume="resumeSession"
         @end="endSession"
       />
-      <div v-if="filteredSessions.length === 0" class="empty">没有符合条件的课堂记录。</div>
+      <div v-if="filteredSessions.length === 0" class="empty">{{ t('history.empty') }}</div>
     </div>
 
     <!-- Session detail -->
     <div class="detail" v-else>
       <div class="detail-header">
-        <button @click="returnToList" class="back-btn">← 返回列表</button>
-        <div class="detail-identity"><h2>{{ selectedSession.session.name }}</h2><span :title="`翻译方向：${planDirections(plan)}`">{{ directionLabel }}</span></div>
+        <button @click="returnToList" class="back-btn">{{ t('history.back') }}</button>
+        <div class="detail-identity"><h2>{{ selectedSession.session.name }}</h2><span :title="t('history.directions', { directions: planDirections(plan) })">{{ directionLabel }}</span></div>
         <button class="btn-summary" @click="triggerSummary" :disabled="summaryLoading">
-          {{ summaryLoading ? '正在生成…' : '生成总结' }}
+          {{ summaryLoading ? t('history.summarizing') : t('history.summarize') }}
         </button>
       </div>
       <p v-if="renameError" class="rename-error" role="alert">{{ renameError }}</p>
 
       <div class="detail-body">
         <div class="segments">
-          <section v-if="selectedSession.session.recording_state === 'paused'" class="paused-card" aria-label="已暂停的课堂">
+          <section v-if="selectedSession.session.recording_state === 'paused'" class="paused-card" :aria-label="t('history.pausedLabel')">
             <div>
-              <strong>这节课已暂停</strong>
-              <p>已录 {{ formatTs((selectedSession.session.duration_seconds || 0) * 1000) }}。继续上课会接着录同一节课，字幕、精修和说话人编号都会延续。</p>
+              <strong>{{ t('history.pausedTitle') }}</strong>
+              <p>{{ t('history.pausedText', { time: formatTs((selectedSession.session.duration_seconds || 0) * 1000) }) }}</p>
             </div>
             <div class="paused-actions">
-              <button class="button button-primary" type="button" :disabled="actionBusy" @click="resumeSession(selectedSession.session.id)">继续上课</button>
-              <button class="button button-secondary" type="button" :disabled="actionBusy" @click="endSession(selectedSession.session.id)">结束课堂</button>
+              <button class="button button-primary" type="button" :disabled="actionBusy" @click="resumeSession(selectedSession.session.id)">{{ t('history.resume') }}</button>
+              <button class="button button-secondary" type="button" :disabled="actionBusy" @click="endSession(selectedSession.session.id)">{{ t('history.end') }}</button>
             </div>
           </section>
-          <section class="recording-card" aria-label="课堂录音">
-            <div><strong>完整课堂录音</strong><p>{{ recordingStatusText }}</p></div>
+          <section class="recording-card" :aria-label="t('history.recordingLabel')">
+            <div><strong>{{ t('history.recordingTitle') }}</strong><p>{{ recordingStatusText }}</p></div>
             <div v-if="recording?.available && !recording.recording" class="recording-actions">
-              <a v-if="recording.size_bytes <= 0xFFFFFFFF - 36" class="download-recording" :href="recording.wav_url" download>下载 WAV</a>
-              <a class="download-recording secondary" :href="recording.pcm_url" download>原始 PCM</a>
+              <a v-if="recording.size_bytes <= 0xFFFFFFFF - 36" class="download-recording" :href="recording.wav_url" download>{{ t('history.downloadWav') }}</a>
+              <a class="download-recording secondary" :href="recording.pcm_url" download>{{ t('history.rawPcm') }}</a>
             </div>
           </section>
-          <section class="history-materials" aria-label="课堂材料">
+          <section class="history-materials" :aria-label="t('history.materialsLabel')">
             <MaterialsPanel :session-id="selectedSession.session.id" :can-edit="false" />
           </section>
           <div class="section-heading">
-            <h4>精修译文</h4>
-            <span>基于录音重新识别和翻译 · {{ targetLabel }}</span>
+            <h4>{{ t('history.polishTitle') }}</h4>
+            <span>{{ t('history.polishNote', { languages: targetLabel }) }}</span>
           </div>
           <OutlinePanel class="history-outline" :outline="historyOutline" :lang="readingLang" default-open :limit-height="false" />
-          <div v-if="!historyChunks.length" class="section-empty">这节课还没有精修译文。</div>
+          <div v-if="!historyChunks.length" class="section-empty">{{ t('history.polishEmpty') }}</div>
           <PolishCard
             v-for="chunk in historyChunks"
             :key="chunk.id"
@@ -70,7 +70,7 @@
             :speakers="historySpeakers"
             @rename-speaker="renameHistorySpeaker"
           />
-          <div class="section-heading live-heading"><h4>实时字幕</h4></div>
+          <div class="section-heading live-heading"><h4>{{ t('history.liveTitle') }}</h4></div>
           <div
             v-for="seg in selectedSession.segments"
             :key="seg.id"
@@ -92,12 +92,12 @@
               :lang="line.lang || readingLang"
             >
               <span v-if="savedLines(seg).length > 1 && line.lang" class="seg-tag" :title="languageLabel(line.lang)">{{ shortLanguageLabel(line.lang) }}</span>
-              <span>{{ line.text || '翻译暂不可用' }}</span>
+              <span>{{ line.text || t('feed.unavailable') }}</span>
             </div>
           </div>
         </div>
         <div class="summary-panel" v-if="selectedSession.session.summary">
-          <h4>课堂总结</h4>
+          <h4>{{ t('history.summaryTitle') }}</h4>
           <pre class="summary-content">{{ selectedSession.session.summary }}</pre>
         </div>
       </div>
@@ -116,7 +116,9 @@ import OutlinePanel from '../components/OutlinePanel.vue'
 import SpeakerChip from '../components/SpeakerChip.vue'
 import DirectionBadge from '../components/DirectionBadge.vue'
 import { useSessionStore } from '../stores/session'
-import { languageLabel, planDirections, planLabel, sessionPlan, shortLanguageLabel } from '../utils/languages.js'
+import { languageLabel, languageList, planDirections, planLabel, sessionPlan, shortLanguageLabel } from '../utils/languages.js'
+import { t } from '../i18n/index.js'
+import { errorText, serverMessage } from '../i18n/apiErrors.js'
 import { normalizeOutline, normalizePolishChunk } from '../utils/polish.js'
 import { segmentFromRecord, translationLines } from '../utils/segments.js'
 import { normalizeSpeakerName, speakersFromList } from '../utils/speakers.js'
@@ -142,7 +144,7 @@ function returnToList() {
 const plan = computed(() => sessionPlan(selectedSession.value?.session))
 const mainLang = computed(() => plan.value.languages[0])
 const readingLang = computed(() => plan.value.displayLanguages[0])
-const targetLabel = computed(() => plan.value.displayLanguages.map(languageLabel).join('、'))
+const targetLabel = computed(() => languageList(plan.value.displayLanguages))
 const directionLabel = computed(() => planLabel(plan.value))
 const historySpeakers = computed(() => speakersFromList(selectedSession.value?.speakers))
 const historyChunks = computed(() => (selectedSession.value?.polished_chunks || []).map(normalizePolishChunk))
@@ -152,12 +154,14 @@ function savedLines(seg) {
   return translationLines(segmentFromRecord(seg))
 }
 const recordingStatusText = computed(() => {
-  if (recordingState.value === 'loading') return '正在检查服务器上的录音…'
-  if (recordingState.value === 'error') return '暂时无法确认录音状态。'
-  if (!recording.value?.available) return '本节课暂无可下载录音。'
-  if (recording.value.recording) return '录音仍在保存，结束后可下载。'
+  if (recordingState.value === 'loading') return t('history.recordingChecking')
+  if (recordingState.value === 'error') return t('history.recordingError')
+  if (!recording.value?.available) return t('history.recordingNone')
+  if (recording.value.recording) return t('history.recordingActive')
   const bytes = recording.value.size_bytes
-  return bytes ? `已保存在服务器 · ${(bytes / 1024 / 1024).toFixed(1)} MB${recording.value.low_disk_warning ? ' · 磁盘空间不足' : ''}` : '已保存在服务器，可下载录音。'
+  if (!bytes) return t('history.recordingSaved')
+  const size = (bytes / 1024 / 1024).toFixed(1)
+  return t(recording.value.low_disk_warning ? 'history.recordingLowDisk' : 'history.recordingSize', { size })
 })
 
 const filteredSessions = computed(() =>
@@ -200,17 +204,17 @@ async function loadSession(id) {
 
 async function deleteSession(id) {
   if (liveStore.isFinalizing && id === liveStore.currentSessionId) {
-    alert('这节课仍在收尾，请等待精修完成后再删除。')
+    alert(t('history.deleteFinishing'))
     return
   }
-  if (!confirm('确定删除这节课？字幕、笔记、课程材料和服务器录音将一并永久删除。')) return
+  if (!confirm(t('history.confirmDelete'))) return
   try {
     await axios.delete(`/api/sessions/${id}`)
     sessions.value = sessions.value.filter(s => s.id !== id)
     if (selectedSession.value?.session?.id === id) returnToList()
     forgetLiveClass(id)
   } catch (e) {
-    alert(e.response?.status === 409 ? '这节课正在录音，请先暂停或结束。' : e.response?.data?.detail || '删除失败，请稍后重试。')
+    alert(e.response?.status === 409 ? t('history.deleteRecording') : serverMessage(e) || t('history.deleteFailed'))
   }
 }
 
@@ -228,7 +232,7 @@ async function resumeSession(id) {
     liveStore.resumeOnOpen = true
     await router.push('/')
   } catch (e) {
-    alert(e.response?.data?.detail || e.message || '无法继续这节课，请稍后重试。')
+    alert(errorText(e, t('history.resumeFailed')))
   } finally {
     actionBusy.value = false
   }
@@ -236,7 +240,7 @@ async function resumeSession(id) {
 
 async function endSession(id) {
   if (actionBusy.value) return
-  if (!confirm('结束后这节课不能再继续录音。确定结束？')) return
+  if (!confirm(t('history.confirmEnd'))) return
   actionBusy.value = true
   try {
     const { data } = await axios.post(`/api/sessions/${id}/end`)
@@ -244,7 +248,7 @@ async function endSession(id) {
     forgetLiveClass(id)
     if (selectedSession.value?.session?.id === id) await loadSession(id)
   } catch (e) {
-    alert(e.response?.status === 409 ? '这节课正在录音或仍在保存，请稍后再试。' : e.response?.data?.detail || '结束失败，请稍后重试。')
+    alert(e.response?.status === 409 ? t('history.endBusy') : serverMessage(e) || t('history.endFailed'))
   } finally {
     actionBusy.value = false
   }
@@ -280,7 +284,7 @@ async function renameHistorySpeaker(index, name) {
   } catch (error) {
     if (!stillShown()) return
     selectedSession.value.speakers = previous
-    renameError.value = `说话人名称保存失败：${error.response?.data?.detail || error.message}`
+    renameError.value = t('actions.speakerFailed', { message: errorText(error) })
   }
 }
 
