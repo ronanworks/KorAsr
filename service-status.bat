@@ -1,4 +1,7 @@
 @echo off
-REM service-status.bat — show whether the service is running and whether autostart is registered
-powershell -NoProfile -Command "$c = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue; if ($c) { $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; if ($p) { Write-Host ('RUNNING   PID=' + $p.Id + '  (' + $p.ProcessName + ')') -ForegroundColor Green; Write-Host '  https://localhost:8000'; Write-Host '  https://100.95.4.120:8000  (Tailscale)' } else { Write-Host ('Port 8000 held by PID=' + $c.OwningProcess + ' but process info unavailable.') -ForegroundColor Yellow } } else { Write-Host 'NOT RUNNING' -ForegroundColor Red }; Write-Host ''; $t = Get-ScheduledTask -TaskName 'KorASR Backend' -ErrorAction SilentlyContinue; if ($t) { Write-Host ('Autostart : enabled  (state=' + $t.State + ')') -ForegroundColor Cyan } else { Write-Host 'Autostart : disabled' -ForegroundColor Gray }"
-pause
+rem service-status.bat - is KorASR running and healthy, are classes recording, GPU, Kimi balance, URLs.
+setlocal
+call "%~dp0scripts\service-env.cmd"
+"%KORASR_PY%" "%~dp0scripts\service_ctl.py" status
+if /I not "%~1"=="--no-pause" if /I not "%~1"=="--quiet" pause
+endlocal
