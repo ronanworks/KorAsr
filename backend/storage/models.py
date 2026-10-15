@@ -29,8 +29,8 @@ class Session(SQLModel, table=True):
     # Language plan, JSON arrays (contract 2026-10-05). NULL on rows saved before it:
     # backend.languages.session_plan() derives them from the legacy fields.
     languages: Optional[str] = Field(default=None, sa_type=Text)          # frequent, 1–2, main first
-    extra_languages: Optional[str] = Field(default=None, sa_type=Text)    # occasional, 0–2
-    display_languages: Optional[str] = Field(default=None, sa_type=Text)  # 1–4, reading language first
+    extra_languages: Optional[str] = Field(default=None, sa_type=Text)    # occasional, 0–3
+    display_languages: Optional[str] = Field(default=None, sa_type=Text)  # 1–5, reading language first
     live_outline: Optional[str] = Field(default=None, sa_type=Text)   # running 课堂脉络
     speaker_names: Optional[str] = Field(default=None, sa_type=Text)  # JSON {"0": "教授"}
     # OnlineSpeakerTracker.export_state() JSON, so a resumed class keeps its speaker

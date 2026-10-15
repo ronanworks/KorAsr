@@ -4,7 +4,7 @@
 speakers, pause/resume, polish windows and outline). Design and measurements:
 `data/eval/2026-10-05/multilang/design.md` (local, not in git).
 2026-10-15 · Japanese (`ja`) added as a classroom, display and interface language; up to 3
-occasional and 5 display languages. Measurements: `data/eval/2026-10-15/ja/report.md` (local).
+occasional and 5 display languages. Measurements: `data/eval/2026-10-15/ja/report.html` (local).
 
 ## 一句话总结
 

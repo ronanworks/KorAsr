@@ -50,8 +50,8 @@ class SessionCreate(BaseModel):
     # Language plan (docs/dev/2026-10-05-contract-multilang.md). Any of them given →
     # the plan decides and the legacy fields are recomputed from it.
     languages: Optional[list[str]] = None           # frequent, 1–2, main language first
-    extra_languages: Optional[list[str]] = None     # occasional, 0–2
-    display_languages: Optional[list[str]] = None   # 1–4, reading language first
+    extra_languages: Optional[list[str]] = None     # occasional, 0–3
+    display_languages: Optional[list[str]] = None   # 1–5, reading language first
 
 
 class SessionUpdate(BaseModel):

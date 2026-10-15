@@ -296,7 +296,7 @@ class JapaneseLanguageIdTests(unittest.TestCase):
     """Japanese as an occasional language needs stronger evidence than English or Russian.
 
     Probabilities are the real Whisper large-v3 values of the 10-02 class
-    (data/eval/2026-10-05/multilang/raw/langid.jsonl); replay: data/eval/2026-10-15/ja/report.md.
+    (data/eval/2026-10-05/multilang/raw/langid.jsonl); replay: data/eval/2026-10-15/ja/report.html.
     """
 
     FREQUENT = ("ko", "zh")
@@ -313,6 +313,9 @@ class JapaneseLanguageIdTests(unittest.TestCase):
         tools = {"ja": 0.76465, "ko": 0.14148, "zh": 0.00562, "en": 0.0229, "ru": 0.00241}
         self.assertEqual(self.decide(texture, 2.704, 1.88, previous="ko"), "ko")
         self.assertEqual(self.decide(tools, 4.016, 3.06, previous="ko"), "ko")
+        # 09-29 26:16 "너희들하고 똑같은 게 하나야" (a class the threshold was not chosen on).
+        same = {"ja": 0.61133, "ko": 0.10291, "zh": 0.00633, "en": 0.02927, "ru": 0.02278}
+        self.assertEqual(self.decide(same, 3.16, 1.74, previous="ko"), "ko")
         from backend.asr import langid
         with patch.object(langid.settings, "langid_ja_min_prob", 0.5), \
              patch.object(langid.settings, "langid_ja_sticky_min_prob", 0.2):
