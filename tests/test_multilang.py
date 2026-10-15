@@ -135,9 +135,11 @@ class LanguagePlanTests(unittest.TestCase):
     def test_validation(self):
         plan = validate_plan(["ko", "zh"], ["en", "ru"], ["zh", "ko", "en", "ru"])
         self.assertEqual(plan.spoken, ("ko", "zh", "en", "ru"))
+        # Up to 3 occasional and 5 display languages (2026-10-15: en/ru/ja occasional).
+        self.assertEqual(validate_plan(["ko"], ["en", "ru", "zh"], ["zh"]).extra, ("en", "ru", "zh"))
         for languages, extra, display in (
-            ([], [], ["zh"]), (["ko", "zh", "en"], [], ["zh"]), (["ko"], ["en", "ru", "zh"], ["zh"]),
-            (["ko"], [], ["zh", "ko", "en", "ru", "zh"]), (["ja"], [], ["zh"]), (["ko"], [], ["zh", "zh"]),
+            ([], [], ["zh"]), (["ko", "zh", "en"], [], ["zh"]), (["ko"], ["en", "ru", "zh", "ja"], ["zh"]),
+            (["ko"], [], ["zh", "ko", "en", "ru", "ja", "zh"]), (["fr"], [], ["zh"]), (["ko"], [], ["zh", "zh"]),
             (["ko", "zh"], ["zh"], ["zh"]), (["ko", "zh"], [], ["ko", "zh"]), ("ko", [], ["zh"]),
         ):
             with self.subTest(languages=languages, extra=extra, display=display):
@@ -245,7 +247,7 @@ class PlanApiTests(_ApiCase):
     def test_invalid_plans_are_rejected(self):
         for body in ({"languages": ["ko", "zh", "en"]}, {"display_languages": ["ko", "zh"]},
                      {"languages": ["ko"], "extra_languages": ["ko"]}, {"display_languages": []},
-                     {"languages": ["ja"]}, {"extra_languages": ["en", "ru", "ja"]}):
+                     {"languages": ["fr"]}, {"extra_languages": ["en", "ru", "ja", "fr"]}):
             with self.subTest(body=body):
                 with self.assertRaises(HTTPException) as raised:
                     self.create(**body)

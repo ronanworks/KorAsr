@@ -1,4 +1,4 @@
-// 中文界面文案。键与 ko.js / en.js / ru.js 完全一致（tests/i18n.test.mjs 检查）。
+// 中文界面文案。键与 ko.js / en.js / ru.js / ja.js 完全一致（tests/i18n.test.mjs 检查）。
 // {name} 是占位符；{ other: … } 形式按数量选词形（中文只有一种）。
 export default {
   meta: {
@@ -18,9 +18,9 @@ export default {
     language: '界面语言',
   },
   lang: {
-    names: { ko: '韩语', zh: '中文', en: '英语', ru: '俄语' },
-    inline: { ko: '韩语', zh: '中文', en: '英语', ru: '俄语' },
-    short: { ko: '韩', zh: '中', en: '英', ru: '俄' },
+    names: { ko: '韩语', zh: '中文', en: '英语', ru: '俄语', ja: '日语' },
+    inline: { ko: '韩语', zh: '中文', en: '英语', ru: '俄语', ja: '日语' },
+    short: { ko: '韩', zh: '中', en: '英', ru: '俄', ja: '日' },
     unknown: '未知语言',
     planLabel: '{spoken} → {display}',
     planLabelOccasional: '{spoken}（偶尔{extra}）→ {display}',

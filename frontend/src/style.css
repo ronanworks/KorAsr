@@ -17,8 +17,18 @@
 html, body, #app { min-height: 100%; margin: 0; }
 body { overflow-x: hidden; }
 button, input, textarea, select { font: inherit; }
-/* Korean wraps between words, not inside them (the interface in Korean and Korean transcripts). */
+/* Han characters take the shapes of their language. The page carries the interface language and
+   every source and translation line its own code (lang="ja" / "zh" / "ko"); without these stacks a
+   Japanese line would borrow Chinese or Korean glyphs from the fonts above, and a Chinese line in the
+   Japanese interface Japanese ones. */
+:lang(ja) { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Yu Gothic UI', 'Meiryo', 'Hiragino Sans', 'Noto Sans JP', system-ui, sans-serif; }
+:lang(zh) { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei UI', system-ui, sans-serif; }
+:lang(ko) { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif; }
+/* Korean wraps between words, not inside them (the interface in Korean and Korean transcripts).
+   word-break is inherited, so a Chinese or Japanese line inside the Korean interface is set back:
+   with keep-all a sentence without spaces would only break at its punctuation. */
 :lang(ko) { word-break: keep-all; overflow-wrap: break-word; }
+:lang(zh), :lang(ja) { word-break: normal; }
 button, a, summary { -webkit-tap-highlight-color: transparent; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .55; }

@@ -23,7 +23,12 @@ class SummaryPromptTests(unittest.TestCase):
         self.assertIn("课堂原文（多语：韩语、中文、英语）", prompt)
         self.assertIn("只用中文", prompt)
         with self.assertRaises(ValueError):
-            build_summary_prompt("ja", ["ko"])
+            build_summary_prompt("fr", ["ko"])
+
+    def test_japanese_summary_uses_japanese_headings(self):
+        prompt = build_summary_prompt("ja", ["ko"])
+        self.assertIn("只用日语", prompt)
+        self.assertIn("## 主な内容\n## 重要な概念\n## 重要な発言\n## 要確認事項", prompt)
 
     def test_each_sentence_carries_only_its_primary_translation(self):
         english = SimpleNamespace(

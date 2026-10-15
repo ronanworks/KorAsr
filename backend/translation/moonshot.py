@@ -35,10 +35,11 @@ UNCLEAR_MARKERS = {
     "ko": "（잘 안 들림）",
     "en": "(inaudible)",
     "ru": "(неразборчиво)",
+    "ja": "（聞き取れず）",
 }
 # Any language's marker, full- or half-width brackets, optional final full stop.
 _UNCLEAR_RE = re.compile(
-    r"^[（(]\s*(?:听不清|聽不清|잘\s*안\s*들림|inaudible|неразборчиво)\s*[）)]\s*[。.]?$",
+    r"^[（(]\s*(?:听不清|聽不清|잘\s*안\s*들림|inaudible|неразборчиво|聞き取れず)\s*[）)]\s*[。.]?$",
     re.IGNORECASE,
 )
 
@@ -90,11 +91,14 @@ STOP_SEQUENCES = ["\n\n"]
 _META_RE = re.compile(
     r"语境|原文|注[:：]|網路|网络流行|梗|可能是指|意思是|结合前文|這裡|这里是"
     r"|等等|让我|根据前文|根据上下文|更可能是|应为|误识别"
-    # The same kind of explanation written in the target language (Korean / English / Russian).
+    # The same kind of explanation written in the target language (Korean / English / Russian / Japanese).
     r"|원문|문맥상|의미입니다|뜻입니다|참고[:：]|번역[:：]"
     r"|(?i:\bin this context\b|\boriginal text\b|\bit (?:probably |likely )?means\b"
     r"|\b(?:probably|likely|possibly) refers to\b|\bnote[:：]|\btranslation[:：])"
     r"|(?i:в данном контексте|оригинал[ае]?\b|означает|примечание|перевод[:：])"
+    # Only consulted for multi-line or over-long output: a one-line translation that says
+    # おそらく or と思われます is returned as it is (tests/test_japanese.py).
+    r"|文脈上|という意味|と思われます|訳注|おそらく"
 )
 _NOTE_LINE_RE = re.compile(r"^[（(]?\s*(?:注|註|备注|说明|Note)\s*[:：]|^※")
 # A line with no letters at all ("-", "---", "……") is not a translation (10-02 seq 152).
@@ -187,6 +191,8 @@ def sentence_looks_complete(text: str, lang: str) -> bool:
     """Rough check that a clip ends a sentence; only Korean, English and Russian.
 
     SenseVoice puts "。" after every Chinese clip, so punctuation says nothing there.
+    Japanese is treated like Chinese: only the forced-cut flags mark a fragment. Three A/B
+    rounds showed that marking too many clips unfinished ends most translations in "……".
     """
     stripped = re.sub(r"[\s.,!?…。，！？~\"'”’)）]+$", "", text or "")
     if lang == "ko":

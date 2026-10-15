@@ -44,11 +44,11 @@ Browser mic (AudioWorklet, 4096-sample blocks) ──WS /ws/{session_id}──�
        → one LLM call: per-run translation + 本分钟要点 → PolishedChunk; outline every 5 windows
 ```
 
-- Language plan per class (backend/languages.py): `languages` (frequent, main first), `extra_languages` (occasional), `display_languages` (reading language first). Each sentence is translated into every display language except its own; the first target is the primary one. The default plan (ko,zh / – / zh,ko) is the old bidirectional class. Legacy column names `ko_text` / `zh_text` mean "spoken text" / "primary translation"; `segment.translations` holds all targets.
+- Language plan per class (backend/languages.py): `languages` (frequent, main first), `extra_languages` (occasional), `display_languages` (reading language first). Each sentence is translated into every display language except its own; the first target is the primary one. The default plan (ko,zh / – / zh,ko) is the old bidirectional class. Languages: ko, zh, en, ru, ja; Japanese shares Han characters with Chinese, so script checks use kana and the Chinese-only clean-up (Simplified conversion, fillers, SenseVoice) runs only for `lang == "zh"`. Legacy column names `ko_text` / `zh_text` mean "spoken text" / "primary translation"; `segment.translations` holds all targets.
 - One module-level GPU semaphore serializes all Whisper work across sessions; interim previews skip when it is busy.
 - A polish window always advances even if ASR/LLM fail (falls back to live translations).
 - Frontend: Vue 3 + Pinia (`frontend/src/stores/session.js` handles WS messages); interface contracts in `docs/dev/2026-09-28-contract-bilingual-speaker-polish.md` and `docs/dev/2026-10-05-contract-multilang.md`.
-- Interface languages zh/ko/en/ru (`frontend/src/i18n/`): every visible string lives in `locales/{zh,ko,en,ru}.js` with identical keys; `frontend/tests/i18n.test.mjs` fails on missing keys and on any Chinese text in `frontend/src` outside the locale files and comments. Transcripts, translations, key points and speaker names are data, never translated. Exports take `?ui_lang=`.
+- Interface languages zh/ko/en/ru/ja (`frontend/src/i18n/`): every visible string lives in `locales/{zh,ko,en,ru,ja}.js` with identical keys; `frontend/tests/i18n.test.mjs` fails on missing keys and on any Chinese or Japanese text in `frontend/src` outside the locale files and comments. Transcripts, translations, key points and speaker names are data, never translated. Exports take `?ui_lang=`.
 
 ## Important Notes
 

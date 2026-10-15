@@ -13,8 +13,11 @@ class RealtimeTranslationContextTests(unittest.TestCase):
         with patch.object(settings, "moonshot_model", "kimi-k2.6"):
             self.assertEqual(completion_options(), {"extra_body": {"thinking": {"type": "disabled"}}})
 
-    def test_all_six_supported_directions_name_the_current_source_and_target(self):
-        self.assertEqual(len(SUPPORTED_PAIRS), 6)
+    def test_all_ten_legacy_directions_name_the_current_source_and_target(self):
+        # Old clients pick one direction: ko/zh into zh/ko/en/ru, and Japanese both ways (2026-10-15).
+        self.assertEqual(len(SUPPORTED_PAIRS), 10)
+        self.assertIn(("ko", "ja"), SUPPORTED_PAIRS)
+        self.assertIn(("ja", "zh"), SUPPORTED_PAIRS)
         for source_lang, target_lang in SUPPORTED_PAIRS:
             with self.subTest(source_lang=source_lang, target_lang=target_lang):
                 messages = build_translation_messages(
@@ -23,11 +26,12 @@ class RealtimeTranslationContextTests(unittest.TestCase):
                 self.assertIn(LANGUAGE_LABELS[target_lang], messages[0]["content"])
                 self.assertIn(f"当前待译{LANGUAGE_LABELS[source_lang]}", messages[1]["content"])
         with self.assertRaises(ValueError):
-            build_translation_messages("invalid", source_lang="ja", target_lang="zh")
+            build_translation_messages("invalid", source_lang="fr", target_lang="zh")
 
     def test_every_direction_a_language_plan_can_produce_has_a_prompt(self):
         # A multi-language class translates any classroom language into any display language
-        # (e.g. English into Chinese and Korean): all 12 ordered pairs of the four languages.
+        # (e.g. English into Chinese and Korean): all 20 ordered pairs of the five languages.
+        self.assertEqual(sorted(LANGUAGE_LABELS), ["en", "ja", "ko", "ru", "zh"])
         codes = sorted(LANGUAGE_LABELS)
         for source_lang in codes:
             for target_lang in codes:

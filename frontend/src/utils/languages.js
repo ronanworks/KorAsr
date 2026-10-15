@@ -1,19 +1,20 @@
 // Classroom languages and the class's language plan (contract docs/dev/2026-10-05-contract-multilang.md):
 // - languages: frequent classroom languages, 1–2, the first is the main (lecture) language;
-// - extraLanguages: occasional languages, 0–2 (recognised only on clear evidence);
-// - displayLanguages: languages to read, 1–4, the first is the reading language.
+// - extraLanguages: occasional languages, 0–3 (recognised only on clear evidence);
+// - displayLanguages: languages to read, 1–5, the first is the reading language.
 // A sentence in language s is translated into every display language except s, in display order.
 //
-// Labels follow the interface language (i18n): Korean is 韩语 / 한국어 / Korean / Корейский.
+// Labels follow the interface language (i18n): Korean is 韩语 / 한국어 / Korean / Корейский / 韓国語.
 // Every label function takes the interface language as its last argument (default: the current
 // one, which keeps templates and computed values reactive to a switch).
 import { locale, t } from '../i18n/index.js'
 
-export const LANGUAGE_CODES = Object.freeze(['ko', 'zh', 'en', 'ru'])
+export const LANGUAGE_CODES = Object.freeze(['ko', 'zh', 'en', 'ru', 'ja'])
 
+// Same limits as the server (backend/languages.py): ko/zh frequent, en/ru/ja occasional, all five shown.
 export const MAX_FREQUENT_LANGUAGES = 2
-export const MAX_EXTRA_LANGUAGES = 2
-export const MAX_DISPLAY_LANGUAGES = 4
+export const MAX_EXTRA_LANGUAGES = 3
+export const MAX_DISPLAY_LANGUAGES = 5
 
 // Today's bidirectional Korean ⇄ Chinese class.
 export const DEFAULT_PLAN = Object.freeze({

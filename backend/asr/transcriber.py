@@ -78,6 +78,14 @@ RU_HALLUCINATION_BLACKLIST = (
     "спасибо за просмотр", "подписывайтесь", "до новых встреч",
     "благодарю за внимание", "благодарю вас за внимание",
 )
+# Japanese video-outro hallucinations, collected the same way (2026-10-15): forcing ja on the
+# 422 decodable clips the 10-02 class dropped gave "ご視聴ありがとうございました" 160×,
+# "次の動画でお会いしましょう" 4×, "本日はご覧いただきありがとうございます" 2×, "次回予告" 2×
+# (data/eval/2026-10-15/ja/blacklist.md). Phrases a student may really say in class
+# (ありがとうございました, ご清聴ありがとうございました) are in the low-energy list below instead.
+JA_HALLUCINATION_BLACKLIST = (
+    "ご視聴ありがとう", "ご覧いただきありがとう", "次の動画でお会いしましょう", "次回予告",
+)
 # Only outputs up to this many characters are checked against the blacklist (Korean and
 # Chinese: < 45 as before). Latin/Cyrillic credits run longer: the observed ones are
 # "Thank you very much for being here with us today. Thank you." (60) and
@@ -86,15 +94,22 @@ _SHORT_OUTPUT_MAX_CHARS = {"en": 60, "ru": 60}
 _DEFAULT_SHORT_OUTPUT_MAX_CHARS = 44
 _CASELESS_BLACKLIST_LANGUAGES = frozenset({"en", "ru"})
 
-# Whole English/Russian outputs that are noise hallucinations when the audio is quiet
+# Whole English/Russian/Japanese outputs that are noise hallucinations when the audio is quiet
 # (forced en/ru on the 10-02 class: "Thank you." 19×, "Thank you very much." 5×,
-# "Amen." 3×, "Спасибо." 3×). Compared without case and final punctuation, en/ru only,
-# so Korean/Chinese results are exactly as before.
+# "Amen." 3×, "Спасибо." 3×; forced ja: every phrase seen at least twice on the dropped clips,
+# ありがとうございました 35×, おやすみなさい 26×, お疲れ様でした 7×, ご清聴ありがとうございました 6×,
+# 以上で終わります 5×, お待ちしております 4×, 2× each for the rest). Compared without case and
+# final punctuation, en/ru/ja only, so Korean/Chinese results are exactly as before.
 LOW_ENERGY_PHRASES_BY_LANGUAGE = {
     "en": frozenset({
         "thank you", "thank you very much", "thank you all", "okay", "all right", "bye", "you", "oh", "amen",
     }),
     "ru": frozenset({"спасибо", "извините", "всего доброго", "пока", "ой"}),
+    "ja": frozenset({
+        "ありがとうございました", "おやすみなさい", "お疲れ様でした", "ご清聴ありがとうございました",
+        "以上で終わります", "お待ちしております", "ご協力ありがとうございました", "どうもありがとうございました",
+        "ごめんなさい", "はい",
+    }),
 }
 _FINAL_PUNCT_RE = re.compile(r"[\s.!?…,。！？]+$")
 
@@ -116,6 +131,8 @@ def _blacklist_for(language: str):
         return EN_HALLUCINATION_BLACKLIST
     if language == "ru":
         return RU_HALLUCINATION_BLACKLIST
+    if language == "ja":
+        return JA_HALLUCINATION_BLACKLIST
     return ()
 
 
@@ -178,6 +195,10 @@ def looks_degenerate(text: str) -> bool:
 _BOUNDARY_PUNCT = " ,.!?;:，。！？、；：…"
 
 
+# Languages written without spaces between words: a repeated boundary is cut by characters.
+_UNSPACED_LANGUAGES = frozenset({"zh", "ja"})
+
+
 def strip_repeated_boundary(previous: str, current: str, language: str) -> str:
     """Drop the head of `current` that repeats the tail of `previous`.
 
@@ -186,7 +207,8 @@ def strip_repeated_boundary(previous: str, current: str, language: str) -> str:
     "입고｜입고 커플인 거"). Only call this for such continuations. Comparison ignores
     spaces/punctuation and needs at least 2 characters (a single repeated Chinese
     character, "广｜广布", is as likely a misheard word as an overlap). Korean is only
-    cut at a word boundary, so "남자친구｜남자친구가" keeps its particle.
+    cut at a word boundary, so "남자친구｜남자친구가" keeps its particle; Chinese and
+    Japanese have no spaces, so they are cut by characters ("について｜について説明します").
     """
     prev = [char for char in previous if char.isalnum()]
     positions = [i for i, char in enumerate(current) if char.isalnum()]
@@ -194,8 +216,8 @@ def strip_repeated_boundary(previous: str, current: str, language: str) -> str:
         if prev[-n:] != [current[i] for i in positions[:n]]:
             continue
         end = positions[n - 1] + 1
-        if language != "zh" and end < len(current) and current[end].isalnum():
-            continue   # the match ends inside a Korean/English word
+        if language not in _UNSPACED_LANGUAGES and end < len(current) and current[end].isalnum():
+            continue   # the match ends inside a Korean/English/Russian word
         rest = current[end:].lstrip(_BOUNDARY_PUNCT)
         return rest or current
     return current
@@ -283,8 +305,9 @@ def _run_inference_mlx(audio: np.ndarray, prompt: str, beam_size: int, language:
 def _run_inference(audio: np.ndarray, prompt: str, beam_size: int, language: str) -> str:
     """根据语言和 settings.asr_backend 分发：普通话优先 SenseVoice，其余走 Whisper。
 
-    English and Russian stay on Whisper: SenseVoice has no Russian, and there is no
-    evidence yet that it does better on classroom English.
+    English, Russian and Japanese stay on Whisper: SenseVoice has no Russian, and there is
+    no evidence yet that it does better on classroom English or Japanese. Only Mandarin
+    (language == "zh", never "contains Han characters") gets the Simplified/filler clean-up.
     """
     if language == "zh":
         text = sensevoice.transcribe(audio)

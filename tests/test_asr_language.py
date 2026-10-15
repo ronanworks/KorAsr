@@ -23,7 +23,7 @@ class ASRLanguageTests(unittest.TestCase):
 
     def test_unsupported_speech_language_is_rejected(self):
         with self.assertRaises(ValueError):
-            transcriber.transcribe_audio(np.ones(16000, dtype=np.float32), language="ja")
+            transcriber.transcribe_audio(np.ones(16000, dtype=np.float32), language="fr")
 
     def test_chinese_polish_passes_language_to_whisper(self):
         seen = {}

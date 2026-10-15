@@ -877,13 +877,15 @@ class TopicHintTests(_HandlerTestCase):
 
     def test_the_default_name_of_every_interface_language_is_not_a_topic(self):
         hint = self.handler._topic_hint
-        for name in ("课堂 · 10月5日", "수업 · 10월 5일", "Class · October 5", "Занятие · 5 октября", "课堂·9月28日"):
+        for name in ("课堂 · 10月5日", "수업 · 10월 5일", "Class · October 5", "Занятие · 5 октября", "课堂·9月28日",
+                     "授業 · 10月15日", "授業 · 1月5日"):
             with self.subTest(name=name):
                 self.assertEqual(hint(types.SimpleNamespace(name=name), None), "")
 
     def test_a_name_the_user_typed_is_still_the_topic(self):
         hint = self.handler._topic_hint
-        for name in ("Class · Microeconomics", "经济学 · 10月5日", "수업 · 경제학", "Занятие · экономика 2"):
+        for name in ("Class · Microeconomics", "经济学 · 10月5日", "수업 · 경제학", "Занятие · экономика 2",
+                     "授業 · 経済学", "経済学の授業 · 10月15日"):
             with self.subTest(name=name):
                 self.assertEqual(hint(types.SimpleNamespace(name=name), None), f"课程名称：{name}")
 

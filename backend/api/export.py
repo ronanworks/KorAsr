@@ -13,16 +13,17 @@ from backend.languages import LANGUAGE_LABELS, LanguagePlan, segment_translation
 
 router = APIRouter(prefix="/api/sessions", tags=["export"])
 
-# Headers and labels of an export follow the interface language (?ui_lang=zh|ko|en|ru).
+# Headers and labels of an export follow the interface language (?ui_lang=zh|ko|en|ru|ja).
 # zh, the default, is today's export byte for byte (its section titles were English already).
 # Transcripts, translations, key points, outlines, notes and speaker names are data: unchanged.
 # LANGUAGE_LABELS in backend/languages.py is prompt text; other languages get their own names.
-EXPORT_UI_LANGUAGES = ("zh", "ko", "en", "ru")
+EXPORT_UI_LANGUAGES = ("zh", "ko", "en", "ru", "ja")
 _NAMES = {
     "zh": dict(LANGUAGE_LABELS),
-    "ko": {"ko": "한국어", "zh": "중국어", "en": "영어", "ru": "러시아어"},
-    "en": {"ko": "Korean", "zh": "Chinese", "en": "English", "ru": "Russian"},
-    "ru": {"ko": "Корейский", "zh": "Китайский", "en": "Английский", "ru": "Русский"},
+    "ko": {"ko": "한국어", "zh": "중국어", "en": "영어", "ru": "러시아어", "ja": "일본어"},
+    "en": {"ko": "Korean", "zh": "Chinese", "en": "English", "ru": "Russian", "ja": "Japanese"},
+    "ru": {"ko": "Корейский", "zh": "Китайский", "en": "Английский", "ru": "Русский", "ja": "Японский"},
+    "ja": {"ko": "韓国語", "zh": "中国語", "en": "英語", "ru": "ロシア語", "ja": "日本語"},
 }
 # Inside a sentence or a tag Russian writes language names in lower case.
 _INLINE_NAMES = {**_NAMES, "ru": {code: name.lower() for code, name in _NAMES["ru"].items()}}
@@ -66,6 +67,17 @@ _TEXT = {
         "segments": "Фраз", "transcript": "Субтитры", "time": "Время", "original": "Оригинал",
         "outline": "Ход занятия", "polished": "Чистовой перевод", "summary": "Итоги (ИИ)",
         "notes": "Мои заметки", "part": "Часть {n}",
+    },
+    # Model-translated like the frontend's ja.js; a native speaker should review it.
+    "ja": {
+        "speaker": "話者{n}", "speaker_named": "話者{n}（{name}）",
+        "plan": "{main} → {reading}（{details}）",
+        "frequent": "授業の言語：{langs}", "extra": "時々：{langs}", "display": "表示：{langs}",
+        "list_sep": "、", "clause_sep": "；", "run_sep": "：",
+        "date": "日付", "direction": "翻訳の方向", "duration": "録音時間", "minutes": "{n}分",
+        "segments": "字幕数", "transcript": "原文字幕", "time": "時間", "original": "原文",
+        "outline": "授業の流れ", "polished": "推敲した翻訳", "summary": "AI要約",
+        "notes": "マイノート", "part": "パート{n}",
     },
 }
 

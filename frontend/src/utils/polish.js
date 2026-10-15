@@ -93,13 +93,13 @@ export function upsertPolishChunk(chunks, chunk) {
 }
 
 // "- 要点一\n- 要点二" → ['要点一', '要点二'] (bullets, numbering and headings stripped).
-// The full-width marks in these patterns (． 、 ） （ 。) are written as escapes.
+// The full-width marks in these patterns (． 、 ） （ 。 ・) are written as escapes.
 export function bulletLines(text) {
   if (typeof text !== 'string') return []
   return text
     .split(/\r?\n/)
     // Markers need trailing space where content could start the same way (3.5%, -5%).
-    .map(line => line.replace(/^\s*(?:#{1,6}\s+|[-*+]\s+|[•·・]\s*|\d{1,2}(?:[.\uff0e](?!\d)|[\u3001)\uff09])\s*)/, '').trim())
+    .map(line => line.replace(/^\s*(?:#{1,6}\s+|[-*+]\s+|[•·\u30fb]\s*|\d{1,2}(?:[.\uff0e](?!\d)|[\u3001)\uff09])\s*)/, '').trim())
     .filter(Boolean)
 }
 

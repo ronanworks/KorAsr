@@ -225,13 +225,14 @@ def _close_recording(
 CONTEXT_WINDOW_MS = 60_000     # earlier sentences shown to the live translator
 CONTEXT_MAX_ITEMS = 8
 # The default class name of each interface language (frontend prep.defaultName with the month
-# and day from Intl): 课堂 · 10月5日, 수업 · 10월 5일, Class · October 5, Занятие · 5 октября.
-# It says nothing about the topic, so it never becomes a "课程名称" line of the prompt.
+# and day from Intl): 课堂 · 10月5日, 수업 · 10월 5일, Class · October 5, Занятие · 5 октября,
+# 授業 · 10月15日. It says nothing about the topic, so it never becomes a "课程名称" line of the prompt.
 _DEFAULT_NAME_RE = re.compile(
     r"^(?:课堂\s*·\s*\d+月\d+日"
     r"|수업\s*·\s*\d+월\s*\d+일"
     r"|Class\s*·\s*[A-Z][a-z]+\s+\d{1,2}"
-    r"|Занятие\s*·\s*\d{1,2}\s+[а-яё]+)$"
+    r"|Занятие\s*·\s*\d{1,2}\s+[а-яё]+"
+    r"|授業\s*·\s*\d+月\d+日)$"
 )
 
 

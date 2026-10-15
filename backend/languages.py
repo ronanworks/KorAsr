@@ -7,8 +7,8 @@ because a class translates in several directions.
 
 A class has a language plan (contract: docs/dev/2026-10-05-contract-multilang.md):
 - languages: frequent classroom languages, 1–2, the first is the main (lecture) language;
-- extra_languages: occasional languages, 0–2, switched to only on clear evidence;
-- display_languages: languages to read, 1–4, the first is the reading language.
+- extra_languages: occasional languages, 0–3, switched to only on clear evidence;
+- display_languages: languages to read, 1–5, the first is the reading language.
 Each sentence in language s is translated into every display language except s,
 in display order; the first of them is its primary target (legacy target_lang/zh_text).
 """
@@ -21,20 +21,24 @@ LANGUAGE_LABELS = {
     "zh": "中文",
     "en": "英语",
     "ru": "俄语",
+    "ja": "日语",
 }
 
 # Directions a user can pick when creating a session with the legacy fields.
 SUPPORTED_PAIRS = frozenset({
-    ("ko", "zh"), ("ko", "en"), ("ko", "ru"),
-    ("zh", "ko"), ("zh", "en"), ("zh", "ru"),
+    ("ko", "zh"), ("ko", "en"), ("ko", "ru"), ("ko", "ja"),
+    ("zh", "ko"), ("zh", "en"), ("zh", "ru"), ("zh", "ja"),
+    ("ja", "ko"), ("ja", "zh"),
 })
 
-# Whisper handles all four well; bidirectional sessions may hear the target language.
+# Whisper recognises all five (Mandarin goes to SenseVoice first, transcriber.py);
+# bidirectional sessions may hear the target language.
 ASR_LANGUAGES = frozenset(LANGUAGE_LABELS)
 
+# A class of the user: ko/zh frequent, en/ru/ja occasional; all five may be shown.
 MAX_FREQUENT_LANGUAGES = 2
-MAX_EXTRA_LANGUAGES = 2
-MAX_DISPLAY_LANGUAGES = 4
+MAX_EXTRA_LANGUAGES = 3
+MAX_DISPLAY_LANGUAGES = 5
 DEFAULT_LANGUAGES = ("ko", "zh")
 DEFAULT_EXTRA_LANGUAGES: tuple[str, ...] = ()
 DEFAULT_DISPLAY_LANGUAGES = ("zh", "ko")
@@ -216,22 +220,35 @@ def segment_translations(seg, plan: LanguagePlan | None = None) -> dict[str, str
 
 # ── Writing systems: output checks must not assume a Korean/Chinese pair ──
 
-LANGUAGE_SCRIPTS = {"ko": "hangul", "zh": "han", "en": "latin", "ru": "cyrillic"}
+# The script that tells each language's text apart. Japanese writes kana and Han characters
+# (kanji); Han is shared with Chinese, so kana are what distinguish Japanese.
+LANGUAGE_SCRIPTS = {"ko": "hangul", "zh": "han", "en": "latin", "ru": "cyrillic", "ja": "kana"}
 
 _SCRIPT_RANGES = {
     "hangul": (("가", "힣"), ("ᄀ", "ᇿ"), ("㄰", "㆏")),
     "han": (("一", "鿿"), ("㐀", "䶿")),
     "latin": (("A", "Z"), ("a", "z"), ("À", "ɏ")),
     "cyrillic": (("Ѐ", "ӿ"),),
+    # Hiragana, katakana, katakana phonetic extensions, half-width katakana.
+    "kana": (("぀", "ゟ"), ("゠", "ヿ"), ("ㇰ", "ㇿ"), ("ｦ", "ﾟ")),
 }
 
 # Characters of output per character of input, generous upper bounds. One Chinese
-# character often needs a whole English word; Hangul syllables sit in between.
+# character often needs a whole English word; Hangul syllables and Japanese (kana with
+# kanji) sit in between.
 _EXPANSION = {
     ("han", "latin"): 6, ("han", "cyrillic"): 6,
     ("hangul", "latin"): 4, ("hangul", "cyrillic"): 4,
+    ("kana", "latin"): 4, ("kana", "cyrillic"): 4,
     ("latin", "cyrillic"): 2, ("cyrillic", "latin"): 2,
 }
+
+# Chinese → Japanese: a Japanese translation may be all kanji (品質評価, 人工知能), so it only
+# counts as untranslated with no kana at all and more Han characters than such a phrase has.
+JA_ALL_KANJI_MAX = 6
+# Japanese → Chinese: kanji are shared, kana are not. Japanese left in a Chinese translation
+# shows as kana; a copied "画像生成の品質評価" has 1 kana in 9 characters.
+JA_KANA_SHARE_IN_CHINESE = 0.1
 
 
 def script_counts(text: str) -> dict[str, int]:
@@ -254,13 +271,24 @@ def looks_untranslated(translation: str, source_lang: str | None, target_lang: s
 
     Latin-script speech is judged leniently: a Chinese or Korean translation of
     English legitimately keeps product names such as ComfyUI or CFG.
+    Japanese is kana plus kanji: kanji count as Japanese text, except between Japanese and
+    Chinese, where only kana tell the two apart.
     """
     source_script = LANGUAGE_SCRIPTS.get(source_lang or "")
     target_script = LANGUAGE_SCRIPTS.get(target_lang or "")
     if not source_script or not target_script or source_script == target_script:
         return False
     counts = script_counts(translation)
+    if source_lang == "zh" and target_lang == "ja":
+        return counts["kana"] == 0 and counts["han"] > JA_ALL_KANJI_MAX
+    if source_lang == "ja" and target_lang == "zh":
+        kana = counts["kana"]
+        return kana > 0 and kana / (kana + counts["han"]) >= JA_KANA_SHARE_IN_CHINESE
     spoken, wanted = counts[source_script], counts[target_script]
+    if source_lang == "ja":
+        spoken += counts["han"]      # kanji left in a Korean, English or Russian translation
+    if target_lang == "ja":
+        wanted += counts["han"]      # a Japanese translation may be all kanji
     if spoken == 0:
         return False
     if wanted == 0:

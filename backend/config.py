@@ -65,6 +65,14 @@ class Settings(BaseSettings):
     langid_extra_min_ratio: float = 2.0
     langid_extra_min_speech_s: float = 1.0
     langid_extra_sticky_min_prob: float = 0.2
+    # Japanese as an occasional language needs stronger evidence: Whisper hears Korean as Japanese.
+    # 10-02 class replayed with ko,zh + en,ru,ja (data/eval/2026-10-15/ja/report.md): with the
+    # en/ru gate two saved Korean sentences became Japanese (p(ja) 0.772 and 0.765, p(ko) 0.13–0.14)
+    # and three noise clips became Japanese lines; at 0.85 nothing changes. A Japanese turn continues
+    # only on p(ja) ≥ 0.5 (not 0.2): Korean clips at p(ja) 0.40–0.47 > p(ko) followed those sentences.
+    langid_ja_min_prob: float = 0.85
+    langid_ja_min_ratio: float = 2.0
+    langid_ja_sticky_min_prob: float = 0.5
 
     # Union type prevents pydantic-settings from attempting json.loads before the validator.
     # Substrings of short outputs. "구독" / "좋아요" alone dropped real speech

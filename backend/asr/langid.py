@@ -65,6 +65,19 @@ def choose_language(
     return LanguageDecision(best, shares[best], total, probs)
 
 
+def extra_gate(code: str) -> tuple[float, float, float, float]:
+    """(min_prob, min_ratio, min_speech_s, sticky_min_prob) of occasional language `code`.
+
+    Japanese has its own, stricter values (settings.langid_ja_*): Whisper confuses Korean with
+    Japanese, see config.py.
+    """
+    if code == "ja":
+        return (settings.langid_ja_min_prob, settings.langid_ja_min_ratio,
+                settings.langid_extra_min_speech_s, settings.langid_ja_sticky_min_prob)
+    return (settings.langid_extra_min_prob, settings.langid_extra_min_ratio,
+            settings.langid_extra_min_speech_s, settings.langid_extra_sticky_min_prob)
+
+
 def choose_language_tiered(
     probs: dict[str, float],
     frequent: tuple[str, ...],
@@ -91,13 +104,14 @@ def choose_language_tiered(
         p_extra = float(probs.get(best_extra, 0.0))
         p_frequent = {code: float(probs.get(code, 0.0)) for code in frequent}
         best_frequent = max(p_frequent.values())
+        min_prob, min_ratio, min_speech_s, sticky_min_prob = extra_gate(best_extra)
         if previous == best_extra:
-            accept = p_extra >= best_frequent and p_extra >= settings.langid_extra_sticky_min_prob
+            accept = p_extra >= best_frequent and p_extra >= sticky_min_prob
         else:
             accept = (
-                p_extra >= settings.langid_extra_min_prob
-                and p_extra >= settings.langid_extra_min_ratio * best_frequent
-                and speech_s >= settings.langid_extra_min_speech_s
+                p_extra >= min_prob
+                and p_extra >= min_ratio * best_frequent
+                and speech_s >= min_speech_s
             )
         if accept:
             total = p_extra + sum(p_frequent.values())

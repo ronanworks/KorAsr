@@ -1,5 +1,6 @@
-// Interface languages (zh / ko / en / ru): complete and consistent locale files, no Chinese left
-// in the code outside them, language choice and persistence, plurals, dates, labels, server errors.
+// Interface languages (zh / ko / en / ru / ja): complete and consistent locale files, no Chinese or
+// Japanese left in the code outside them, language choice and persistence, plurals, dates, labels,
+// server errors.
 import assert from 'node:assert/strict'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
@@ -38,7 +39,8 @@ function placeholders(leaf) {
   return [...new Set(texts.flatMap(text => [...text.matchAll(/\{(\w+)\}/g)].map(match => match[1])))].sort()
 }
 
-test('the four locale files have exactly the same keys, placeholders and no empty text', () => {
+test('the five locale files have exactly the same keys, placeholders and no empty text', () => {
+  assert.deepEqual(LOCALES, ['zh', 'ko', 'en', 'ru', 'ja'])
   const flat = Object.fromEntries(LOCALES.map(code => [code, flatten(MESSAGES[code])]))
   const keys = Object.keys(flat.zh).sort()
   assert.ok(keys.length > 300, `${keys.length} keys`)
@@ -72,11 +74,13 @@ test('plural messages have every form their language needs', () => {
   assert.equal(t('item.segments', { count: 12 }, 'en'), '12 subtitles')
   assert.equal(t('item.segments', { count: 12 }, 'zh'), '12 段字幕')
   assert.equal(t('item.segments', { count: 12 }, 'ko'), '자막 12개')
+  assert.equal(t('item.segments', { count: 12 }, 'ja'), '字幕 12 件')
+  assert.equal(t('item.segments', { count: 1 }, 'ja'), '字幕 1 件')
 })
 
 // Comments may explain things in Chinese; everything else in frontend/src must not contain
-// Chinese characters or Chinese punctuation (a '、' join left in an English interface).
-const CHINESE = /[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/
+// Chinese characters, Japanese kana or CJK punctuation (a '、' join left in an English interface).
+const CHINESE = /[\u3000-\u303f\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/
 
 function withoutComments(text) {
   return text
@@ -103,9 +107,11 @@ test('no Chinese text in frontend/src outside the locale files and comments', ()
     })
   }
   assert.deepEqual(found, [])
-  // The check itself sees Chinese where it should.
+  // The check itself sees Chinese and Japanese where it should.
   assert.ok(CHINESE.test(withoutComments("const label = '中文'")))
   assert.ok(CHINESE.test(withoutComments("names.join('、')")))
+  assert.ok(CHINESE.test(withoutComments("const label = 'にほんご'")))
+  assert.ok(CHINESE.test(withoutComments("const label = 'ニホンゴ'")))
   assert.ok(!CHINESE.test(withoutComments('// 注释 only\n/* 也是注释 */\n<!-- 注释 -->')))
 })
 
@@ -113,7 +119,9 @@ test('the default language follows navigator.languages, otherwise Chinese', () =
   assert.equal(detectLocale(['ko-KR', 'en-US']), 'ko')
   assert.equal(detectLocale(['ru']), 'ru')
   assert.equal(detectLocale(['en-GB', 'zh-CN']), 'en')
-  assert.equal(detectLocale(['ja-JP', 'zh-TW']), 'zh')
+  assert.equal(detectLocale(['ja-JP', 'zh-TW']), 'ja')
+  assert.equal(detectLocale(['ja']), 'ja')
+  assert.equal(detectLocale(['fr-FR', 'ja-JP', 'en']), 'ja')
   assert.equal(detectLocale(['fr-FR', 'de']), DEFAULT_LOCALE)
   assert.equal(detectLocale([]), 'zh')
   assert.equal(detectLocale(undefined), 'zh')
@@ -152,7 +160,7 @@ test('a chosen language is remembered in this browser and wins over navigator.la
   assert.equal(locale.value, 'ru')
   assert.equal(storage.items.get(LOCALE_STORAGE_KEY), 'ru')
   assert.equal(initialLocale(), 'ru', 'next visit: the stored choice')
-  assert.equal(setLocale('ja'), false, 'unknown language')
+  assert.equal(setLocale('fr'), false, 'unknown language')
   assert.equal(locale.value, 'ru')
   storage.items.set(LOCALE_STORAGE_KEY, 'xx')
   assert.equal(initialLocale(), 'ko', 'a broken stored value falls back to the browser')
@@ -174,7 +182,9 @@ test('t() interpolates, falls back to Chinese, then to the key', () => {
   assert.equal(t('no.such.key', {}, 'ru'), 'no.such.key')
   assert.equal(t('status.recording', {}, 'xx'), '录音 {time}', 'unknown language: Chinese, placeholder kept')
   assert.equal(localeName('ko'), '한국어')
-  assert.deepEqual(LOCALES.map(localeName), ['中文', '한국어', 'English', 'Русский'])
+  assert.deepEqual(LOCALES.map(localeName), ['中文', '한국어', 'English', 'Русский', '日本語'])
+  assert.equal(t('status.recording', { time: '01:05' }, 'ja'), '録音 01:05')
+  assert.equal(t('plan.tooManyOccasional', { count: 3 }, 'ja'), '時々使う言語は最大3つです')
 })
 
 test('dates and the default class name follow the interface language', () => {
@@ -182,18 +192,32 @@ test('dates and the default class name follow the interface language', () => {
   const names = Object.fromEntries(LOCALES.map(code => [
     code, t('prep.defaultName', { date: formatDateTime(date, { month: 'long', day: 'numeric' }, code) }, code),
   ]))
-  assert.deepEqual(names, { zh: '课堂 · 10月5日', ko: '수업 · 10월 5일', en: 'Class · October 5', ru: 'Занятие · 5 октября' })
+  // The server never sends these default names as a class topic (backend/ws/handler.py _DEFAULT_NAME_RE).
+  assert.deepEqual(names, {
+    zh: '课堂 · 10月5日', ko: '수업 · 10월 5일', en: 'Class · October 5', ru: 'Занятие · 5 октября', ja: '授業 · 10月5日',
+  })
   assert.equal(formatDateTime('not a date', {}, 'en'), '')
   assert.equal(formatDateTime(date, { hour: '2-digit', minute: '2-digit', hour12: false }, 'ru'), '14:07')
 })
 
 test('language names follow the interface language', () => {
-  assert.deepEqual(LOCALES.map(code => languageLabel('ko', code)), ['韩语', '한국어', 'Korean', 'Корейский'])
-  assert.deepEqual(LOCALES.map(code => inlineLanguageLabel('zh', code)), ['中文', '중국어', 'Chinese', 'китайский'])
-  assert.deepEqual(LOCALES.map(code => shortLanguageLabel('en', code)), ['英', '영', 'EN', 'англ'])
-  assert.deepEqual(LOCALES.map(code => languageList(['zh', 'ko'], code)), ['中文、韩语', '중국어, 한국어', 'Chinese, Korean', 'китайский, корейский'])
-  assert.equal(languageLabel('ja', 'en'), 'ja')
+  assert.deepEqual(LOCALES.map(code => languageLabel('ko', code)), ['韩语', '한국어', 'Korean', 'Корейский', '韓国語'])
+  assert.deepEqual(LOCALES.map(code => inlineLanguageLabel('zh', code)), ['中文', '중국어', 'Chinese', 'китайский', '中国語'])
+  assert.deepEqual(LOCALES.map(code => shortLanguageLabel('en', code)), ['英', '영', 'EN', 'англ', '英'])
+  assert.deepEqual(LOCALES.map(code => languageList(['zh', 'ko'], code)), ['中文、韩语', '중국어, 한국어', 'Chinese, Korean', 'китайский, корейский', '中国語、韓国語'])
+  // Japanese in every interface language, and every language in Japanese.
+  assert.deepEqual(LOCALES.map(code => languageLabel('ja', code)), ['日语', '일본어', 'Japanese', 'Японский', '日本語'])
+  assert.deepEqual(LOCALES.map(code => inlineLanguageLabel('ja', code)), ['日语', '일본어', 'Japanese', 'японский', '日本語'])
+  assert.deepEqual(LOCALES.map(code => shortLanguageLabel('ja', code)), ['日', '일', 'JA', 'яп', '日'])
+  assert.equal(languageList(['ko', 'zh', 'en', 'ru', 'ja'], 'ja'), '韓国語、中国語、英語、ロシア語、日本語')
+  assert.equal(languageLabel('fr', 'en'), 'fr')
   assert.equal(languageLabel(null, 'en'), 'Unknown language')
+  const japanese = { languages: ['ko', 'zh'], extraLanguages: ['en', 'ru', 'ja'], displayLanguages: ['zh', 'ko', 'ja'] }
+  assert.equal(planLabel(japanese, 'zh'), '韩·中（偶尔英·俄·日）→ 中·韩·日')
+  assert.equal(planLabel(japanese, 'ja'), '韓·中（時々英·露·日）→ 中·韓·日')
+  assert.equal(itemBadge('ja', ['zh', 'ko'], japanese, 'zh').short, '日→中·韩')
+  assert.equal(itemBadge('ja', ['zh', 'ko'], japanese, 'ja').spokenText, '日本語の発言、中国語、韓国語に翻訳')
+  assert.equal(planDirections({ languages: ['ja'], extraLanguages: [], displayLanguages: ['zh'] }, 'ja'), '日本語→中国語')
 
   const plan = { languages: ['ko', 'zh'], extraLanguages: ['en'], displayLanguages: ['zh', 'ko'] }
   assert.equal(planLabel(plan, 'en'), 'KO·ZH (sometimes EN) → ZH·KO')
@@ -206,7 +230,8 @@ test('language names follow the interface language', () => {
   assert.equal(badge.full, 'Английский → китайский, корейский')
   assert.equal(badge.spokenText, 'Речь: английский; перевод: китайский, корейский')
   assert.equal(validatePlan({ languages: ['ko'], extraLanguages: [], displayLanguages: ['ko'] }, 'en'), 'The reading language must differ from the main language')
-  assert.equal(validatePlan({ languages: ['ko'], extraLanguages: ['en', 'ru', 'zh'], displayLanguages: ['zh'] }, 'ko'), '가끔 쓰는 언어는 최대 2개입니다')
+  assert.equal(validatePlan({ languages: ['ko'], extraLanguages: ['en', 'ru', 'zh', 'ja'], displayLanguages: ['zh'] }, 'ko'), '가끔 쓰는 언어는 최대 3개입니다')
+  assert.equal(validatePlan({ languages: ['ko'], extraLanguages: ['en', 'ru', 'zh', 'ja'], displayLanguages: ['zh'] }, 'ja'), '時々使う言語は最大3つです')
 
   const seg = { status: 'translating', lang: 'en', targets: ['zh', 'ko'], translations: { zh: '', ko: '' }, translation_state: { zh: 'translating', ko: 'translating' } }
   assert.equal(segmentStatusText(seg, null, 'en'), 'English recognized · translating into Chinese, Korean…')
@@ -242,7 +267,9 @@ test('the language switcher lists each language in its own name and switches the
   assert.equal(select.props.value, 'zh')
   assert.equal(select.props['aria-label'], '界面语言')
   assert.deepEqual(select.children.filter(child => child.type === 'element').map(option => [option.props.value, textOf(option)]),
-    [['zh', '中文'], ['ko', '한국어'], ['en', 'English'], ['ru', 'Русский']])
+    [['zh', '中文'], ['ko', '한국어'], ['en', 'English'], ['ru', 'Русский'], ['ja', '日本語']])
+  assert.deepEqual(select.children.filter(child => child.type === 'element').map(option => option.props.lang),
+    ['zh-CN', 'ko-KR', 'en-US', 'ru-RU', 'ja-JP'])
   assert.match(textOf(toggle.root), /小声增强/)
 
   await trigger(select, 'change', { target: { value: 'ru' } })

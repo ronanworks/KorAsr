@@ -1,23 +1,25 @@
-// Interface languages: 中文 / 한국어 / English / Русский. No dependency: a reactive `locale`,
-// t(key, vars) with {name} placeholders and plural forms (Intl.PluralRules), and Intl date
-// formatting. Only interface text is translated; transcripts, translations, key points,
-// outlines and speaker names are data and are shown as they are.
+// Interface languages: 中文 / 한국어 / English / Русский / 日本語 (each listed in its own name,
+// from its locale file). No dependency: a reactive `locale`, t(key, vars) with {name}
+// placeholders and plural forms (Intl.PluralRules), and Intl date formatting. Only interface
+// text is translated; transcripts, translations, key points, outlines and speaker names are
+// data and are shown as they are.
 //
 // Choice: localStorage 'korasr.locale' (each browser and device keeps its own), otherwise the
-// first of navigator.languages that is one of the four, otherwise Chinese.
+// first of navigator.languages that is one of the five, otherwise Chinese.
 import { ref } from 'vue'
 import { readStored, writeStored } from '../utils/storage.js'
 import zh from './locales/zh.js'
 import ko from './locales/ko.js'
 import en from './locales/en.js'
 import ru from './locales/ru.js'
+import ja from './locales/ja.js'
 
-export const LOCALES = ['zh', 'ko', 'en', 'ru']
+export const LOCALES = ['zh', 'ko', 'en', 'ru', 'ja']
 export const DEFAULT_LOCALE = 'zh'
 export const LOCALE_STORAGE_KEY = 'korasr.locale'
-export const MESSAGES = Object.freeze({ zh, ko, en, ru })
+export const MESSAGES = Object.freeze({ zh, ko, en, ru, ja })
 // BCP 47 tags for Intl and <html lang>.
-export const LOCALE_TAGS = Object.freeze({ zh: 'zh-CN', ko: 'ko-KR', en: 'en-US', ru: 'ru-RU' })
+export const LOCALE_TAGS = Object.freeze({ zh: 'zh-CN', ko: 'ko-KR', en: 'en-US', ru: 'ru-RU', ja: 'ja-JP' })
 export const PLURAL_CATEGORIES = Object.freeze(['zero', 'one', 'two', 'few', 'many', 'other'])
 
 // 'ko-KR' → 'ko', 'zh-Hant-TW' → 'zh', 'pt-BR' → null.

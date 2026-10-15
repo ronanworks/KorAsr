@@ -350,7 +350,7 @@ def merge_adjacent_runs(runs: list[PolishRun]) -> list[PolishRun]:
         last = merged[-1] if merged else None
         if (last is not None and last.speaker == run.speaker and last.lang == run.lang
                 and run.start_ms - last.end_ms <= MAX_RUN_GAP_MS):
-            joiner = "" if run.lang == "zh" else " "
+            joiner = "" if run.lang in ("zh", "ja") else " "   # no spaces between words
             last.source = (last.source + joiner + run.source).strip()
             last.realtime_source = _join([last.realtime_source, run.realtime_source])
             last.add_realtime(run.realtime_translations)
@@ -580,7 +580,7 @@ _SUMMARY_RE = re.compile(r"^\s*(?:#+\s*)?(?:\*\*)?(要点|要點|요점|Key poin
 _NOTE_RE = re.compile(r"^\s*[（(]?\s*(注|註|Note|备注|说明)\s*[:：]|^\s*※")
 
 
-_LANG_NAME = r"(?:韩语|韓語|中文|汉语|英语|俄语|韩文|英文|俄文)"
+_LANG_NAME = r"(?:韩语|韓語|中文|汉语|英语|俄语|韩文|英文|俄文|日语|日文|日本語)"
 _LABEL_PARTS = (
     re.compile(r"^说话人\s*(?:\d+|\?)(?:\s*[（(][^）)]{0,20}[）)])?"),   # 说话人3（教授）
     re.compile(rf"^{_LANG_NAME}?\s*(?:→|->|⇒)\s*{_LANG_NAME}"),          # 韩语→中文, →中文

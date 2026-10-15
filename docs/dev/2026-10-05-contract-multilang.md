@@ -3,6 +3,8 @@
 2026-10-05 · extends `2026-09-28-contract-bilingual-speaker-polish.md` (still valid for
 speakers, pause/resume, polish windows and outline). Design and measurements:
 `data/eval/2026-10-05/multilang/design.md` (local, not in git).
+2026-10-15 · Japanese (`ja`) added as a classroom, display and interface language; up to 3
+occasional and 5 display languages. Measurements: `data/eval/2026-10-15/ja/report.md` (local).
 
 ## 一句话总结
 
@@ -16,11 +18,11 @@ is the **primary target**, which the old fields (`target_lang`, `zh_text`, `zh`,
 | Field | Meaning | Rule | Default |
 |---|---|---|---|
 | `languages` | frequent classroom languages; the first is the **main language** | 1–2 | `["ko","zh"]` |
-| `extra_languages` | occasional classroom languages | 0–2, disjoint from `languages` | `[]` |
-| `display_languages` | languages to read; the first is the **reading language** | 1–4 | `["zh","ko"]` |
+| `extra_languages` | occasional classroom languages | 0–3, disjoint from `languages` | `[]` |
+| `display_languages` | languages to read; the first is the **reading language** | 1–5 | `["zh","ko"]` |
 
-- Codes: `ko`, `zh`, `en`, `ru`. No duplicates. `display_languages[0] != languages[0]`
-  (otherwise 422).
+- Codes: `ko`, `zh`, `en`, `ru`, `ja`. No duplicates. `display_languages[0] != languages[0]`
+  (otherwise 422). The limits fit the user's class: ko/zh frequent, en/ru/ja occasional, all five shown.
 - A display language need not be spoken in class (e.g. show `en` in a Korean class).
 - Targets of a sentence spoken in `s`: `[d for d in display_languages if d != s]`, display order.
   Primary target = the first of them; none when `s` is the only display language.
@@ -42,6 +44,12 @@ is the **primary target**, which the old fields (`target_lang`, `zh_text`, `zh`,
   suffice. Otherwise the frequent languages decide as before.
   Settings: `LANGID_EXTRA_MIN_PROB`, `LANGID_EXTRA_MIN_RATIO`, `LANGID_EXTRA_MIN_SPEECH_S`,
   `LANGID_EXTRA_STICKY_MIN_PROB`.
+- Japanese as the occasional language L has its own, stricter values, because Whisper hears
+  Korean as Japanese: `p(ja) ≥ 0.85` (`LANGID_JA_MIN_PROB`), `≥ 2 × max p(frequent)`
+  (`LANGID_JA_MIN_RATIO`), ≥ 1 s of speech; while the previous sentence was Japanese,
+  `p(ja) ≥ max p(frequent)` and `p(ja) ≥ 0.5` (`LANGID_JA_STICKY_MIN_PROB`).
+- Japanese is recognised by Whisper (never SenseVoice) and gets none of the Chinese clean-up
+  (Traditional → Simplified, filler removal): those run for `lang == "zh"` only.
 
 ## 2. WebSocket server → client
 
@@ -70,8 +78,8 @@ is the **primary target**, which the old fields (`target_lang`, `zh_text`, `zh`,
 - `interim` messages add `targets` once the language is known (reserve placeholders).
 - Clients that ignore the new keys keep working: they read `zh` / `target_lang` as before.
 - A translation with nothing recognisable is only a marker in its target language:
-  `（听不清）` zh, `（잘 안 들림）` ko, `(inaudible)` en, `(неразборчиво)` ru (live and polish;
-  rows saved before may hold `（听不清）` for any target). It is ordinary text to display.
+  `（听不清）` zh, `（잘 안 들림）` ko, `(inaudible)` en, `(неразборчиво)` ru, `（聞き取れず）` ja
+  (live and polish; rows saved before may hold `（听不清）` for any target). It is ordinary text to display.
 
 ### Per-minute polish (`status: "polish"`)
 
@@ -93,8 +101,9 @@ spoken language → that target's live translation).
 - `POST /api/sessions`, `PATCH /api/sessions/{id}` accept optional
   `languages`, `extra_languages`, `display_languages`.
   - None given: the legacy `source_lang` / `target_lang` / `bidirectional` are validated
-    as before (`SUPPORTED_PAIRS`) and the plan is derived from them. A PATCH that repeats
-    the session's current legacy values keeps the plan (e.g. its occasional languages).
+    as before (`SUPPORTED_PAIRS`: ko/zh → zh/ko/en/ru, plus ko → ja, zh → ja, ja → ko, ja → zh)
+    and the plan is derived from them. A PATCH that repeats the session's current legacy
+    values keeps the plan (e.g. its occasional languages).
   - Any given: the plan wins (missing plan fields keep the current / legacy-derived
     value) and the legacy columns are recomputed. Invalid plan → 422.
   - Plan and legacy fields are locked once recording starts (409), as before.
@@ -112,7 +121,7 @@ spoken language → that target's live translation).
   - txt: a one-target sentence stays `原文 | 译文`; several targets → one indented line
     per target (`    中文: …`); sentences not in the main language are tagged `[英语→中文/韩语]`;
   - md: columns `| Time | 原文 | 中文 | 韩语 |` (one per display language).
-  - Optional `ui_lang=zh|ko|en|ru` (`GET …/export?format=md&ui_lang=en`; `ko-KR` → `ko`, unknown →
+  - Optional `ui_lang=zh|ko|en|ru|ja` (`GET …/export?format=md&ui_lang=en`; `ko-KR` → `ko`, unknown →
     `zh`): the interface language of the headers and labels — plan line, columns (`| Time | Original
     | Chinese | Korean |`), language names and tags, default speaker labels (`Speaker 2`), section
     titles. Transcripts, translations, key points, outline, notes and speaker names stay as saved.
@@ -137,4 +146,8 @@ every target `null` and is updated once its translations finish.
 - A sentence card lists its targets in display order (reading language first when it is a
   target); with several targets each line has a one-character language tag and its own
   state (生成中 / 翻译失败).
-- Session label: `韩·中 → 中·韩`, `韩·中（偶尔英·俄）→ 中·韩`.
+- Session label: `韩·中 → 中·韩`, `韩·中（偶尔英·俄）→ 中·韩`, `韩·中（偶尔英·俄·日）→ 中·韩·日`.
+- Every source and translation line carries its language code as `lang` (`ja` / `zh` / `ko` / …):
+  Han characters take that language's glyphs (`:lang(ja)` uses Yu Gothic UI / Meiryo /
+  Hiragino Sans / Noto Sans JP), and the Korean `word-break: keep-all` stays on Korean text.
+- Interface languages: 中文 / 한국어 / English / Русский / 日本語 (browser `ja*` → Japanese).

@@ -19,9 +19,9 @@ export default {
     language: 'Язык интерфейса',
   },
   lang: {
-    names: { ko: 'Корейский', zh: 'Китайский', en: 'Английский', ru: 'Русский' },
-    inline: { ko: 'корейский', zh: 'китайский', en: 'английский', ru: 'русский' },
-    short: { ko: 'кор', zh: 'кит', en: 'англ', ru: 'рус' },
+    names: { ko: 'Корейский', zh: 'Китайский', en: 'Английский', ru: 'Русский', ja: 'Японский' },
+    inline: { ko: 'корейский', zh: 'китайский', en: 'английский', ru: 'русский', ja: 'японский' },
+    short: { ko: 'кор', zh: 'кит', en: 'англ', ru: 'рус', ja: 'яп' },
     unknown: 'Неизвестный язык',
     planLabel: '{spoken} → {display}',
     planLabelOccasional: '{spoken} (иногда {extra}) → {display}',

@@ -22,13 +22,14 @@ class MarkerTests(unittest.TestCase):
     def test_one_marker_per_language(self):
         self.assertEqual(UNCLEAR_MARKERS, {
             "zh": "（听不清）", "ko": "（잘 안 들림）", "en": "(inaudible)", "ru": "(неразборчиво)",
+            "ja": "（聞き取れず）",
         })
         self.assertEqual(UNCLEAR, "（听不清）")
         self.assertEqual(unclear_marker(None), "（听不清）")   # callers without a target: as before
 
     def test_every_version_is_recognised(self):
         for text in ("（听不清）", "(听不清)", "（聽不清）", "（잘 안 들림）", "(잘 안 들림)", "(inaudible)",
-                     "(Inaudible).", "（inaudible）", "(неразборчиво)", " （听不清）。 "):
+                     "(Inaudible).", "（inaudible）", "(неразборчиво)", " （听不清）。 ", "（聞き取れず）", "(聞き取れず)。"):
             with self.subTest(text=text):
                 self.assertTrue(is_unclear_marker(text))
         for text in ("", None, "听不清", "他说听不清楚", "(inaudible) but then he said yes", "잘 안 들림"):
@@ -45,13 +46,31 @@ class MarkerTests(unittest.TestCase):
 
     def test_prompt_v2_is_otherwise_unchanged(self):
         # sha256 of the 12 prompts of 3965b3e (prompt v2 after the 380-sentence A/B); with
-        # the marker put back to （听不清） today's prompts must give the same bytes.
+        # the marker put back to （听不清） today's prompts must give the same bytes. Japanese
+        # (2026-10-15) adds directions but changes none of these 12, Chinese targets included.
         prompts = []
-        for source, target in itertools.permutations(sorted(LANGUAGE_LABELS), 2):
+        for source, target in itertools.permutations(("en", "ko", "ru", "zh"), 2):
             prompt = build_system_prompt(source, target)
             prompts.append(prompt.replace(RULE_7.format(unclear_marker(target)), RULE_7.format("（听不清）")))
         digest = hashlib.sha256("\n\0\n".join(prompts).encode("utf-8")).hexdigest()
         self.assertEqual(digest, "da269fcb939e84637131fe1b54feabca13b22777988fb68fe3e5e14977047f40")
+
+    def test_japanese_directions_are_the_same_prompt_with_japanese_names(self):
+        # The 8 directions to and from Japanese, as built on 2026-10-15 (marker （聞き取れず） for ja).
+        pairs = [(source, target) for source, target in itertools.permutations(sorted(LANGUAGE_LABELS), 2)
+                 if "ja" in (source, target)]
+        self.assertEqual(len(pairs), 8)
+        prompts = [build_system_prompt(source, target) for source, target in pairs]
+        digest = hashlib.sha256("\n\0\n".join(prompts).encode("utf-8")).hexdigest()
+        self.assertEqual(digest, "06ef6bf498740da531d5c9f96fbde3e279dd211c8d96b23f4c537db1527af559")
+        # Each is the Korean→Chinese prompt with the language names and the marker swapped.
+        template = build_system_prompt("ko", "zh")
+        for (source, target), prompt in zip(pairs, prompts):
+            with self.subTest(direction=f"{source}->{target}"):
+                expected = (template.replace("韩语", "\0S").replace("中文", "\0T")
+                            .replace("\0S", LANGUAGE_LABELS[source]).replace("\0T", LANGUAGE_LABELS[target])
+                            .replace("（听不清）", unclear_marker(target)))
+                self.assertEqual(prompt, expected)
 
 
 class SanitizeTests(unittest.TestCase):

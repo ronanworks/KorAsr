@@ -18,9 +18,9 @@ export default {
     language: '화면 언어',
   },
   lang: {
-    names: { ko: '한국어', zh: '중국어', en: '영어', ru: '러시아어' },
-    inline: { ko: '한국어', zh: '중국어', en: '영어', ru: '러시아어' },
-    short: { ko: '한', zh: '중', en: '영', ru: '러' },
+    names: { ko: '한국어', zh: '중국어', en: '영어', ru: '러시아어', ja: '일본어' },
+    inline: { ko: '한국어', zh: '중국어', en: '영어', ru: '러시아어', ja: '일본어' },
+    short: { ko: '한', zh: '중', en: '영', ru: '러', ja: '일' },
     unknown: '알 수 없는 언어',
     planLabel: '{spoken} → {display}',
     planLabelOccasional: '{spoken}(가끔 {extra}) → {display}',

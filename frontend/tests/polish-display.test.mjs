@@ -6,7 +6,8 @@ import {
   runTranslationLines, summaryPoints, upsertPolishChunk,
 } from '../src/utils/polish.js'
 import {
-  DEFAULT_PLAN, itemBadge, planDirections, planFromLegacy, planLabel, planRequestFields, sessionPlan,
+  DEFAULT_PLAN, LANGUAGE_CODES, MAX_DISPLAY_LANGUAGES, MAX_EXTRA_LANGUAGES, MAX_FREQUENT_LANGUAGES,
+  itemBadge, planDirections, planFromLegacy, planLabel, planRequestFields, sessionPlan,
   translationTargets, validatePlan,
 } from '../src/utils/languages.js'
 import {
@@ -118,16 +119,33 @@ test('plan labels and badges: main-language items stay quiet, others show every 
   assert.deepEqual(translationTargets('zh', ['zh', 'ko', 'en']), ['ko', 'en'])
 })
 
+test('Japanese is one of the classroom and display languages', () => {
+  assert.deepEqual(LANGUAGE_CODES, ['ko', 'zh', 'en', 'ru', 'ja'])
+  const plan = { languages: ['ko', 'zh'], extraLanguages: ['en', 'ru', 'ja'], displayLanguages: ['zh', 'ko', 'ja'] }
+  assert.equal(planDirections(plan), '韩语→中文、日语；中文→韩语、日语；英语→中文、韩语、日语；俄语→中文、韩语、日语；日语→中文、韩语')
+  assert.equal(itemBadge('ja', ['zh', 'ko'], plan).full, '日语 → 中文、韩语')
+  assert.deepEqual(translationTargets('ja', plan.displayLanguages), ['zh', 'ko'])
+  assert.deepEqual(planRequestFields(plan), {
+    source_lang: 'ko', target_lang: 'zh', bidirectional: true,
+    languages: ['ko', 'zh'], extra_languages: ['en', 'ru', 'ja'], display_languages: ['zh', 'ko', 'ja'],
+  })
+})
+
 test('settings form validation matches the server rules', () => {
   assert.equal(validatePlan(DEFAULT_PLAN), '')
   assert.equal(validatePlan({ languages: ['ko', 'zh'], extraLanguages: ['en', 'ru'], displayLanguages: ['zh', 'ko', 'en', 'ru'] }), '')
+  // The user's class: ko/zh frequent, en/ru/ja occasional (3), all five languages shown.
+  assert.deepEqual([MAX_FREQUENT_LANGUAGES, MAX_EXTRA_LANGUAGES, MAX_DISPLAY_LANGUAGES], [2, 3, 5])
+  assert.equal(validatePlan({ languages: ['ko', 'zh'], extraLanguages: ['en', 'ru', 'ja'], displayLanguages: ['zh', 'ko', 'en', 'ru', 'ja'] }), '')
+  assert.equal(validatePlan({ languages: ['ja', 'ko'], extraLanguages: [], displayLanguages: ['ko', 'ja'] }), '')
   assert.match(validatePlan({ languages: ['ko', 'zh'], extraLanguages: [], displayLanguages: ['ko', 'zh'] }), /阅读语言/)
   assert.match(validatePlan({ languages: ['ko', 'zh'], extraLanguages: ['zh'], displayLanguages: ['zh'] }), /偶尔/)
-  assert.match(validatePlan({ languages: ['ko'], extraLanguages: ['en', 'ru', 'zh'], displayLanguages: ['zh'] }), /最多 2 种/)
-  assert.match(validatePlan({ languages: ['ko'], extraLanguages: [], displayLanguages: ['zh', 'ko', 'en', 'ru', 'zh'] }), /最多 4 种/)
+  assert.match(validatePlan({ languages: ['ko'], extraLanguages: ['en', 'ru', 'zh', 'ja'], displayLanguages: ['zh'] }), /最多 3 种/)
+  assert.match(validatePlan({ languages: ['ko'], extraLanguages: [], displayLanguages: ['zh', 'ko', 'en', 'ru', 'ja', 'zh'] }), /最多 5 种/)
+  assert.match(validatePlan({ languages: ['ko', 'zh', 'ja'], extraLanguages: [], displayLanguages: ['zh'] }), /最多 2 种/)
   assert.match(validatePlan({ languages: [], extraLanguages: [], displayLanguages: ['zh'] }), /主讲语言/)
   assert.match(validatePlan({ languages: ['ko'], extraLanguages: [], displayLanguages: [] }), /阅读语言/)
-  assert.match(validatePlan({ languages: ['ja'], extraLanguages: [], displayLanguages: ['zh'] }), /不支持/)
+  assert.match(validatePlan({ languages: ['fr'], extraLanguages: [], displayLanguages: ['zh'] }), /不支持/)
   assert.deepEqual(planRequestFields({ languages: ['ko'], extraLanguages: ['en'], displayLanguages: ['zh'] }), {
     source_lang: 'ko', target_lang: 'zh', bidirectional: true,
     languages: ['ko'], extra_languages: ['en'], display_languages: ['zh'],
