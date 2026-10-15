@@ -62,6 +62,12 @@ class ServiceCtlTests(unittest.TestCase):
         self.assertFalse(ctl.is_korasr({"path": r"C:\Program Files\Other\server.exe", "cmd": "server.exe"}))
         self.assertFalse(ctl.is_korasr({"path": pythonw, "cmd": f'"{pythonw}" other_tool.py'}))
         self.assertFalse(ctl.is_korasr(None))
+        # Another machine: the venv named in service-env.local.cmd counts, other Pythons do not.
+        venv = r"E:\KorASR\venv\Scripts\pythonw.exe"
+        with patch.dict(os.environ, {"KORASR_PYW": venv, "KORASR_PY": r"E:\KorASR\venv\Scripts\python.exe"}):
+            self.assertTrue(ctl.is_korasr({"path": venv, "cmd": f'"{venv}" start.py --port 8100'}))
+            korstudy = r"C:\Users\A8000\AppData\Local\Programs\Python\Python312\python.exe"
+            self.assertFalse(ctl.is_korasr({"path": korstudy, "cmd": f'"{korstudy}" -m uvicorn korstudy.web.app'}))
 
     def test_database_path_follows_the_service_environment(self):
         with patch.dict(os.environ, {"DATABASE_URL": "sqlite:///./data/korasr-local-test.db"}):

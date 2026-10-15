@@ -59,12 +59,22 @@ def listener() -> dict | None:
     return json.loads(out) if out else None
 
 
+def _service_python_dirs() -> set[str]:
+    """Folders of the configured service Python (KORASR_PY / KORASR_PYW), lower-case."""
+    return {
+        str(Path(value).parent).lower()
+        for value in (os.environ.get("KORASR_PY"), os.environ.get("KORASR_PYW"))
+        if value
+    }
+
+
 def is_korasr(info: dict | None) -> bool:
-    """A process of this project's service: python(w) of the korasr environment running start.py."""
+    """A process of this project's service: the configured (or korasr-env) Python running start.py."""
     if not info:
         return False
     path, cmd = (info.get("path") or "").lower(), (info.get("cmd") or "").lower()
-    return "\\envs\\korasr\\" in path and "start.py" in cmd
+    ours = str(Path(path).parent).lower() in _service_python_dirs() or "\\envs\\korasr\\" in path
+    return bool(path) and ours and "start.py" in cmd
 
 
 def database_path() -> Path | None:

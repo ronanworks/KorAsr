@@ -27,3 +27,7 @@ rem CTranslate2 finds cuBLAS in the aicut environment's torch build; installing
 rem nvidia-cublas-cu12 into the korasr environment would remove this dependency.
 rem Node.js is needed when start.py rebuilds the frontend.
 set "PATH=C:\Users\4090\.conda\envs\aicut\Lib\site-packages\torch\lib;C:\Program Files\nodejs;%PATH%"
+
+rem Another machine keeps its own paths and port in scripts\service-env.local.cmd
+rem (not in git), which runs last and may override anything above.
+if exist "%~dp0service-env.local.cmd" call "%~dp0service-env.local.cmd"

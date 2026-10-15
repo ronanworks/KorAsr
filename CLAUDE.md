@@ -15,7 +15,9 @@ python -m backend.admin create-user --username admin --admin   # first account (
 python scripts/download_speaker_model.py # once: CAM++ voiceprint model for speaker labels
 ```
 
-Windows service helpers (double-click): `service-start.bat` / `service-stop.bat` / `service-restart.bat` / `service-status.bat` / `service-logs.bat`. They load `scripts\service-env.cmd` (Python path, database `data/korasr-local-test.db`, model settings, PATH; edit only this file on another machine) and call `scripts/service_ctl.py`, which never stops a process that is not KorASR and asks before stopping while a class is recording. Do not register autostart on the user's daily PC.
+Windows service helpers (double-click): `service-start.bat` / `service-stop.bat` / `service-restart.bat` / `service-status.bat` / `service-logs.bat`. They load `scripts\service-env.cmd` (Python path, database `data/korasr-local-test.db`, model settings, PATH; edit only this file on another machine) and call `scripts/service_ctl.py`, which never stops a process that is not KorASR and asks before stopping while a class is recording. Machine-specific paths and port go in `scripts\service-env.local.cmd` (gitignored, runs last). Do not register autostart on the user's daily PC (the 4090).
+
+Production (since 2026-10-15) runs on A8000 (`ssh A8000@100.95.4.120`, Windows, Quadro RTX 8000) in `E:\KorASR` with its own `venv`, port 8100 (port 8000 there belongs to another app, korstudy), Tailscale `https://desktop-1v7tjst.tail1447d0.ts.net:8444` (tailnet) / `:8443` (public). Deployment notes: `docs/deploy-a8000.md`.
 The legacy single-file servers in `legacy/` are archived; do not run them.
 
 ## Tests

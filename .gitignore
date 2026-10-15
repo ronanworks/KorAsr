@@ -31,3 +31,6 @@ data/eval/
 
 # Local credentials handed to testers (never commit)
 data/private/
+
+# machine-specific service settings (see scripts/service-env.cmd)
+scripts/service-env.local.cmd
