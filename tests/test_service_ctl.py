@@ -68,6 +68,10 @@ class ServiceCtlTests(unittest.TestCase):
             self.assertTrue(ctl.is_korasr({"path": venv, "cmd": f'"{venv}" start.py --port 8100'}))
             korstudy = r"C:\Users\A8000\AppData\Local\Programs\Python\Python312\python.exe"
             self.assertFalse(ctl.is_korasr({"path": korstudy, "cmd": f'"{korstudy}" -m uvicorn korstudy.web.app'}))
+            # venv\Scripts\pythonw.exe is a launcher; the base interpreter it starts holds the port.
+            base = r"C:\Users\A8000\AppData\Local\Programs\Python\Python312\pythonw.exe"
+            self.assertTrue(ctl.is_korasr({"path": base, "cmd": f'"{base}" start.py --port 8100', "parent_path": venv}))
+            self.assertFalse(ctl.is_korasr({"path": base, "cmd": f'"{base}" start.py', "parent_path": r"C:\Windows\explorer.exe"}))
 
     def test_database_path_follows_the_service_environment(self):
         with patch.dict(os.environ, {"DATABASE_URL": "sqlite:///./data/korasr-local-test.db"}):

@@ -49,12 +49,15 @@ def _powershell(command: str) -> str:
 
 def listener() -> dict | None:
     """The process listening on PORT: pid, address, path, cmd, started, mem (bytes)."""
+    # The parent matters on a Windows venv: venv\Scripts\pythonw.exe is only a launcher
+    # that starts the base interpreter, which is the process holding the port (A8000).
     out = _powershell(
         f"$c = Get-NetTCPConnection -LocalPort {PORT} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; "
         "if ($c) { $p = Get-CimInstance Win32_Process -Filter \"ProcessId=$($c.OwningProcess)\"; "
+        "$q = if ($p) { Get-CimInstance Win32_Process -Filter \"ProcessId=$($p.ParentProcessId)\" } else { $null }; "
         "[pscustomobject]@{ pid = $c.OwningProcess; address = $c.LocalAddress; path = $p.ExecutablePath; "
         "cmd = $p.CommandLine; started = $(if ($p) { $p.CreationDate.ToString('o') } else { $null }); "
-        "mem = $p.WorkingSetSize } | ConvertTo-Json -Compress }"
+        "mem = $p.WorkingSetSize; parent_path = $(if ($q) { $q.ExecutablePath } else { $null }) } | ConvertTo-Json -Compress }"
     )
     return json.loads(out) if out else None
 
@@ -73,8 +76,14 @@ def is_korasr(info: dict | None) -> bool:
     if not info:
         return False
     path, cmd = (info.get("path") or "").lower(), (info.get("cmd") or "").lower()
-    ours = str(Path(path).parent).lower() in _service_python_dirs() or "\\envs\\korasr\\" in path
-    return bool(path) and ours and "start.py" in cmd
+    parent = (info.get("parent_path") or "").lower()
+    dirs = _service_python_dirs()
+    ours = (
+        str(Path(path).parent).lower() in dirs
+        or (parent and str(Path(parent).parent).lower() in dirs)   # venv launcher → base interpreter
+        or "\\envs\\korasr\\" in path
+    )
+    return bool(path) and bool(ours) and "start.py" in cmd
 
 
 def database_path() -> Path | None:
