@@ -58,7 +58,9 @@ ssh A8000@100.95.4.120 "schtasks /Run /TN \"KorASR Backend\""
 1. push 到 GitHub，然后在 A8000 上 `git -C E:\KorASR pull`；
 2. 不 push：在 4090 上 `git bundle create korasr.bundle master`，scp 到 A8000，再 `git -C E:\KorASR fetch <bundle> master` 和 `git -C E:\KorASR merge --ff-only FETCH_HEAD`。
 
-然后重启服务（`service-restart.bat`）。前端源码比 `frontend\dist` 新时，启动会自动重新构建。
+重启前先运行 `service-status.bat`，确认显示"没有课在录音"，并用 SQLite 在线备份复制一份数据库到 `data\backup\`。然后停掉服务、通过开机任务启动（`schtasks /Run /TN "KorASR Backend"`）。前端源码比 `frontend\dist` 新时，启动会自动重新构建。
+
+2026-10-15 日语版本就是这样部署的（数据库备份：`E:\KorASR\data\backup\korasr-local-test-20261015-2056-pre-ja.db` 一类的文件名）。
 
 ## 迁移时做了什么（2026-10-15）
 
